@@ -1,0 +1,15 @@
+# ignore everything…
+*
+
+# …then include only what matters
+!.gitignore
+!README.md
+!LICENSE.md
+!video_vise.py
+!icons/app.ico
+!requirements.txt
+!build.py
+
+!ffmpeg/
+ffmpeg/*
+!ffmpeg/PUT_FFMPEG_AND_FFPROBE_HERE.md

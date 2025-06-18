@@ -1,0 +1,3 @@
+psutil>=7
+PySide6>=6.9
+tifffile>=2025.6.1
