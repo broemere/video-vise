@@ -70,7 +70,8 @@ or
     Run ```video_vise-<version>.exe``` in ```/dist```
     * This executable is fully self-contained, can be copied/moved, and no longer requires the source code or build environment.
 
-   
+---
+
 ## Usage
 1. Launch the GUI
 2. Select a folder containing your image data (avi or tiff files)
@@ -79,6 +80,15 @@ or
 5. Safely delete your original image data
 6. Click Uncompress to convert the mkv back to an avi if necessary (for legacy hardware/software like ImageJ).
 
+---
+
 ## License
 
 **MIT License** -- see ```LICENSE.md``` for details.
+
+Third-party components are distributed under their own terms, see ```LICENSES/```:
+
+* **psutil**: BSD-3-Clause 
+* **tifffile**: BSD-3-Clause 
+* **PySide6 / Qt**: LGPL-3.0
+* **FFmpeg / FFprobe**: LGPL-2.1+

@@ -10,7 +10,7 @@ import subprocess, platform, shutil, os, re
 VERSION_RE  = r'^__version__\s*=\s*[\'"]([^\'"]+)[\'"]'
 
 py = "pyinstaller"
-base = "mkv_converter"
+base = "video_vise"
 script = f"{base}.py"
 
 # Read version from top of your script without importing it
@@ -23,7 +23,7 @@ with open(script, "r", encoding="utf-8") as f:
     else:
         version = "0.0.0"  # fallback
 
-out_name = f"{base}-{version}"
+out_name = f"{base}_v{version}"
 
 cmd = [
     "pyinstaller",

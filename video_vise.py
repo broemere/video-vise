@@ -307,6 +307,7 @@ class FrameValidator(QThread):
         self.comp   = comp
         self.frames = frames
         self.step_pct = 3
+        self.n_hashed = 10
 
     def run(self):
         logger.debug(f"FrameValidator thread STARTED: orig={self.orig}, comp={self.comp}")
@@ -447,6 +448,7 @@ class FrameValidator(QThread):
             line = raw.decode("utf-8", "ignore")
             if not line.startswith("#"):
                 hashes.append(line.rsplit(",", 1)[-1].strip())
+
 
 class PixelLoaderThread(QThread):
     # emits (fp, small_frame)
@@ -677,7 +679,13 @@ class MainWindow(QMainWindow):
             "FFV1 ensures no data loss, so the MKV files can be uncompressed back to the<br>"
             "original AVI if necessary for compatibility on older software or hardware.<br><br>"
 
-            f"v{__version__}"
+            f"v{__version__}<br><br>"
+
+            "<b>Third party components:</b><br>"
+            "• This app uses Qt (PySide6) under terms of LGPL 3.0.<br>"
+            "• This app bundles FFmpeg binaries under the terms of the LGPL-2.1+.<br>"
+            "For full license text and source code links, see <a href=https://github.com/broemere/video-vise/tree/main/licenses>LICENSES</a>."
+
         )
         msg = QMessageBox(self)
         msg.setWindowTitle("Help")
@@ -762,6 +770,7 @@ class MainWindow(QMainWindow):
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create the JSON object for this one key/value pair
+        entry = {key: value}
         with self.storage_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             f.flush()  # push Python’s internal buffer out to the OS
@@ -813,7 +822,7 @@ class MainWindow(QMainWindow):
         ext_color = {
             ".tif": "#4e84af",  # FIJI/ImageJ color
             ".tiff": "#4e84af",
-            ".avi": "#FF5500",  # burnt orange
+            ".avi": "#FFB900",  # burnt orange (#FF5500)
             ".mkv": "#9c27b0",  # deep purple (lighter: #9575cd)
         }
 
@@ -932,67 +941,6 @@ class MainWindow(QMainWindow):
         if self.track_storage:
             self.gb_saved.setText(f"{int(self.get_gb_saved())} GB saved")
         QApplication.processEvents()
-
-    # def inspect_pixels(self):
-    #     btn = self.sender()
-    #     fp = btn.property("fp")  # pathlib.Path or str
-    #     w = btn.property("width")  # int
-    #     h = btn.property("height")  # int
-    #     pix_fmt = btn.property("pix_fmt")  # “gray” or “rgb24” (or similar)
-    #
-    #     # build the ffmpeg command
-    #     cmd = [
-    #         "ffmpeg", "-hide_banner", "-loglevel", "error",
-    #         "-ss", "0",
-    #         "-i", str(fp),
-    #         "-frames:v", "1",
-    #         "-f", "rawvideo",
-    #         "-pix_fmt", pix_fmt,
-    #         "-s", f"{w}x{h}",
-    #         "pipe:1"
-    #     ]
-    #
-    #     # launch and read exactly the right number of bytes
-    #     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    #     bpp = 1 if pix_fmt == "gray" else 3  # bytes per pixel
-    #     n_bytes = w * h * bpp
-    #     raw = proc.stdout.read(n_bytes)
-    #     proc.wait()
-    #
-    #     # raw is a bytes object of length n_bytes
-    #     # now turn that into a Python structure:
-    #
-    #     if pix_fmt.startswith("gray"):
-    #         # Convert the flat bytes to a flat list of ints:
-    #         flat = list(raw)  # each raw[i] → 0–255
-    #
-    #         # (Option A) keep it flat and index with raw[y*w + x]
-    #         # pixel = flat[y*w + x]
-    #
-    #         # (Option B) make a 2D list for convenience:
-    #         frame = [
-    #             flat[row * w: (row + 1) * w]
-    #             for row in range(h)
-    #         ]
-    #     else:
-    #         # your existing BGR/RGB path…
-    #         frame = []
-    #         idx = 0
-    #         for row in range(h):
-    #             pixels = []
-    #             for col in range(w):
-    #                 b, g, r = raw[idx], raw[idx + 1], raw[idx + 2]
-    #                 pixels.append((r, g, b))
-    #                 idx += 3
-    #             frame.append(pixels)
-    #
-    #     h_slice = min(5, h)
-    #     w_slice = min(5, w)
-    #
-    #     # this works for both gray (rows of ints) and rgb (rows of (r,g,b) tuples):
-    #     small_frame = [row[:w_slice] for row in frame[:h_slice]]
-    #
-    #     print(small_frame)
 
     def inspect_pixels(self):
         btn     = self.sender()
@@ -1143,6 +1091,7 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             self.update_table(self.path_edit.text())
             self.btn_cancel.setEnabled(False)
+            self.flash_window()
             return
 
         if not self.batch_queue:
