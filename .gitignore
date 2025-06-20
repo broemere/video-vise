@@ -9,7 +9,7 @@
 !icons/app.ico
 !requirements.txt
 !build.py
-
+!LICENSES
 !ffmpeg/
 ffmpeg/*
 !ffmpeg/PUT_FFMPEG_AND_FFPROBE_HERE.md
