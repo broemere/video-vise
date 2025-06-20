@@ -10,6 +10,7 @@
 !requirements.txt
 !build.py
 !LICENSES/
+!/LICENSES/**
 !ffmpeg/
 ffmpeg/*
 !ffmpeg/PUT_FFMPEG_AND_FFPROBE_HERE.md
