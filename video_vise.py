@@ -8,7 +8,7 @@ Usage:
 
 Author: Eli Broemer
 Created: 2025-04-29
-Version: 1.2
+Version: 1.2.1
 
 Dependencies:
     - Python >= 3.11
@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QFileDialog, QHeaderView,
     QProgressBar, QAbstractItemView, QLabel, QStyle, QSplashScreen, QMessageBox
 )
-from PySide6.QtGui import QPalette, QPixmap, QPainter, QFont, QFontMetrics, QIcon, QColor, QBrush
+from PySide6.QtGui import QPalette, QPixmap, QIcon, QColor, QBrush
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
 import json
 from tifffile import TiffFile, imread
@@ -42,7 +42,7 @@ from fractions import Fraction
 from statistics import median
 
 APP_NAME = "VideoVise"
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 supported_extensions = ["avi", "tif", "tiff", "mkv"]
 DEFAULT_FPS = 10  # Make this a user settable option in the UI?
 
@@ -120,7 +120,8 @@ class FFmpegConverter(QThread):
 
         frame_re = re.compile(r"frame=\s*(\d+)\b")
         cpu_count = os.cpu_count() or 1
-        threads = 3 if cpu_count == 4 else min(max(cpu_count - 4, 1), 16)
+        threads = 3 if cpu_count == 4 else min(max(cpu_count - 2, 1), 16) # Changed from 4 to 2 for 6 core devices
+        # Maybe improve this logic again for different size CPUs (small and large)
         slices = self.choose_slices(threads)
 
         if self._is_tiff():
@@ -142,7 +143,7 @@ class FFmpegConverter(QThread):
 
         # 2) build & spawn ffmpeg
         cmd = [
-            "ffmpeg", "-y",
+            FFMPEG, "-y",
             "-f", "rawvideo",
             "-pix_fmt", pix_fmt,
             "-s", f"{w}x{h}",
@@ -183,7 +184,7 @@ class FFmpegConverter(QThread):
 
             # --- fps logic ---
             imgj = tif.imagej_metadata or {}
-            fps = 0
+            fps = DEFAULT_FPS
 
             if imgj:
                 fps = imgj.get("fps", 0)
@@ -307,13 +308,17 @@ class FrameValidator(QThread):
         self.comp   = comp
         self.frames = frames
         self.step_pct = 3
-        self.n_hashed = 10
+        self.n_hashed = 0
+        self.PREFIX = 20
 
     def run(self):
         logger.debug(f"FrameValidator thread STARTED: orig={self.orig}, comp={self.comp}")
         try:
-            orig_hashes = self._hash_file(self.orig, 0, 50, is_original=True)
-            comp_hashes = self._hash_file(self.comp, 50, 100)
+            comp_hashes = self._hash_file(self.comp, 0, 50)
+            orig_hashes = self._hash_file(self.orig, 50, 100, is_original=True)
+
+            print(comp_hashes[:5])
+            print(orig_hashes[:5])
 
             self.progress.emit(100)
             is_lossless = (orig_hashes == comp_hashes)
@@ -340,31 +345,74 @@ class FrameValidator(QThread):
             return self._hash_video(path, start_pct, end_pct, is_original)
 
     def _hash_video(self, path, start_pct, end_pct, is_original):
-        cmd = [FFMPEG, "-i", str(path), "-map", "0:v:0", "-f", "framemd5", "pipe:1"]
-        if not is_original:
-            pix = self._probe_pix_fmt(path)
-            if pix == "bgr0":
-                cmd.insert(3, "-vf"); cmd.insert(4, "format=bgr24")
-            print("Running cmd", cmd)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
+        SUFFIX_TIME = 2.0
         hashes = []
-        count = 0
-        for line in proc.stdout:
-            if line.startswith('#'):
-                continue
-            hashes.append(line.split(',')[-1].strip())
-            count += 1
-            if self.frames:
-                # Map to the appropriate slice of the progress bar
-                pct = start_pct + min(int(count / self.frames * (end_pct - start_pct)), end_pct - start_pct)
-                self.progress.emit(pct)
 
-        proc.wait()
-        logger.debug(f"Completed framemd5 for {'ORIG' if is_original else 'COMP'} ({count} frames)")
-        # if no frame-count was provided, emit the boundary progress
+        def run_cmd(cmd, pct_start, pct_end, max_frames=None):
+            print(cmd)
+            proc = subprocess.Popen(cmd,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL,
+                                    text=True)
+            count = 0
+
+            # if we don’t know max_frames, emit a start-of-chunk progress
+            if max_frames is None:
+                self.progress.emit(pct_start)
+
+            for line in proc.stdout:
+                if line.startswith("#"):
+                    continue
+                # collect hash
+                hashes.append(line.split(",")[-1].strip())
+                count += 1
+
+                # if we know how many frames to expect, update per-frame
+                if max_frames:
+                    frac = count / max_frames
+                    pct = pct_start + int(frac * (pct_end - pct_start))
+                    self.progress.emit(pct)
+
+            proc.wait()
+            # always emit end-of-chunk
+            self.progress.emit(pct_end)
+
+        # ——— pixel-format filter for non-originals ———
+        pix_fmt = []
+        pix = self._probe_pix_fmt(path)
+        if not is_original and pix:
+            # turn 'bgr0' → 'bgr24', otherwise pass the raw pix fmt
+            fmt = "bgr24" if pix == "bgr0" else pix
+            pix_fmt = ["-vf", f"format={fmt}"]
+
+        # 1) first N frames
+        cmd1 = [
+            FFMPEG, "-i", str(path),
+            "-map", "0:v:0",
+            "-frames:v", str(self.PREFIX),
+            *pix_fmt,
+            "-f", "framemd5", "pipe:1"
+        ]
+        mid = (start_pct + end_pct) // 2
+        run_cmd(cmd1, start_pct, mid, self.PREFIX)
+
+        # 2) last N frames via -sseof
+        # tweak the time offset as needed (here: 2s)
+        cmd2 = [
+            FFMPEG,
+            "-sseof", f"-{SUFFIX_TIME}",
+            "-i", str(path),
+            "-map", "0:v:0",
+            *pix_fmt,
+            "-f", "framemd5", "pipe:1"
+        ]
+        run_cmd(cmd2, mid, end_pct, max_frames=None)
+
+        # ensure we hit 100% if count was zero
         if self.frames == 0:
             self.progress.emit(end_pct)
+        self.n_hashed = len(hashes) - self.PREFIX
         return hashes
 
     def _hash_tiff(self, path: Path, start_pct: int, end_pct: int) -> list[str]:
@@ -389,6 +437,8 @@ class FrameValidator(QThread):
                 "-vf", f"format={pix_fmt}",
                 "-f", "framemd5", "pipe:1"
             ]
+            print(cmd)
+
             proc = subprocess.Popen(cmd,
                                     stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE,
@@ -400,28 +450,63 @@ class FrameValidator(QThread):
             reader.daemon = True
             reader.start()
 
-            # 3) Feed each frame into stdin
+            # # 3) Feed each frame into stdin
+            # last_emit = start_pct
+            # for idx, page in enumerate(pages, start=1):
+            #     frame = page.asarray().astype("uint8")
+            #     # drop extra channels if grayscale declared
+            #     if pix_fmt == "gray" and frame.ndim == 3:
+            #         frame = frame[..., 0]
+            #     proc.stdin.write(frame.tobytes())
+            #
+            #     frac = idx / total
+            #     scaled = start_pct + frac * (end_pct - start_pct)
+            #     if scaled - last_emit >= self.step_pct:
+            #         last_emit += self.step_pct
+            #         self.progress.emit(int(last_emit))
+            #
+            # proc.stdin.close()
+            #
+            # # 4) Wait for reader + process to finish
+            # reader.join()
+            # ret = proc.wait()
+            # if ret != 0:
+            #     raise RuntimeError("FFmpeg framemd5 failed on TIFF")
+
+            # 2) Feed only the desired pages
+            desired_total = self.PREFIX + self.n_hashed
+            processed = 0
             last_emit = start_pct
+
             for idx, page in enumerate(pages, start=1):
-                frame = page.asarray().astype("uint8")
-                # drop extra channels if grayscale declared
-                if pix_fmt == "gray" and frame.ndim == 3:
-                    frame = frame[..., 0]
-                proc.stdin.write(frame.tobytes())
+                # feed first PREFIX or last suffix_count pages
+                if idx <= self.PREFIX or idx > total - self.n_hashed:
+                    #print(idx)
+                    frame = page.asarray().astype("uint8")
+                    if pix_fmt == "gray" and frame.ndim == 3:
+                        # drop extra channels
+                        frame = frame[..., 0]
 
-                frac = idx / total
-                scaled = start_pct + frac * (end_pct - start_pct)
-                if scaled - last_emit >= self.step_pct:
-                    last_emit += self.step_pct
-                    self.progress.emit(int(last_emit))
+                    # write raw bytes
+                    proc.stdin.write(frame.tobytes())
+                    processed += 1
 
+                    # update progress
+                    frac = processed / desired_total
+                    scaled = start_pct + frac * (end_pct - start_pct)
+                    if scaled - last_emit >= self.step_pct:
+                        last_emit += self.step_pct
+                        self.progress.emit(int(last_emit))
+
+                    #if idx == 1:
+                    #    print(frame)
+
+            # 3) Clean up
             proc.stdin.close()
-
-            # 4) Wait for reader + process to finish
             reader.join()
-            ret = proc.wait()
-            if ret != 0:
+            if proc.wait() != 0:
                 raise RuntimeError("FFmpeg framemd5 failed on TIFF")
+
 
         return hashes
 
@@ -684,7 +769,7 @@ class MainWindow(QMainWindow):
             "<b>Third party components:</b><br>"
             "• This app uses Qt (PySide6) under terms of LGPL 3.0.<br>"
             "• This app bundles FFmpeg binaries under the terms of the LGPL-2.1+.<br>"
-            "For full license text and source code links, see <a href=https://github.com/broemere/video-vise/tree/main/licenses>LICENSES</a>."
+            "For full license text and source code links, see <a href=https://github.com/broemere/video-vise/tree/main/LICENSES>LICENSES</a>."
 
         )
         msg = QMessageBox(self)

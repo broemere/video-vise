@@ -6,9 +6,11 @@
 !README.md
 !LICENSE.md
 !video_vise.py
+!icons/
 !icons/app.ico
 !requirements.txt
 !build.py
+!build.spec
 !LICENSES/
 !/LICENSES/**
 !ffmpeg/
