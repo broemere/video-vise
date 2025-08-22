@@ -34,7 +34,7 @@ git clone https://github.com/broemere/video-vise.git
 ```
 or
 
-Direct download: https://link.link
+Direct download: https://github.com/broemere/video-vise/releases
 
 
 ### 2. Install Python dependencies
