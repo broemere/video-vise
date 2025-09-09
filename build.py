@@ -65,7 +65,7 @@ def archive(version):
     elif platform == 'win':
         dist_name += '.exe'
 
-    archive_basename = f"{app_versioned_name}-{platform}"
+    archive_basename = f"{app_versioned_name}_{platform}"
     archive_name = os.path.join('dist', archive_basename)
     shutil.make_archive(archive_name, 'zip', root_dir='dist', base_dir=dist_name)
     print(f"Successfully created archive: {archive_name}.zip\n")

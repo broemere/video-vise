@@ -42,7 +42,7 @@ from fractions import Fraction
 from statistics import median
 
 APP_NAME = "VideoVise"
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 supported_extensions = ["avi", "tif", "tiff", "mkv"]
 DEFAULT_FPS = 10  # Make this a user settable option in the UI?
 
@@ -215,7 +215,7 @@ class FFmpegConverter(QThread):
                     logger.debug(f"Cannot parse frame rate from this tif, falling back to default {DEFAULT_FPS}")
 
             # ensure non-negative
-            fps = max(int(fps), 0)
+            fps = max(fps, 1)
 
         return fps, pix_fmt, w, h
 

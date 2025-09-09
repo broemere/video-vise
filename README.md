@@ -9,7 +9,7 @@ A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV 
 - **Batch conversion** of AVI or multi-page TIFF files into MKV  
 - **Validation** step to confirm no pixel data was lost or altered  
 - **Uncompress** back to AVI for legacy workflows (e.g. ImageJ)  
-- A clean GUI with comprehensive file metadata details/inspection.
+- A clean GUI with comprehensive file metadata details/inspection
 
 ---
 
@@ -67,7 +67,7 @@ or
     ```bash
     python build.py
     ```
-    Run ```video_vise-<version>.exe``` in ```/dist```
+    Run ```video_vise_<version>.exe``` in ```/dist```
     * This executable is fully self-contained, can be copied/moved, and no longer requires the source code or build environment.
 
 ---
@@ -75,10 +75,10 @@ or
 ## Usage
 1. Launch the GUI
 2. Select a folder containing your image data (avi or tiff files)
-3. Click Convert to compress the raw data into a lossless mkv video.
-4. Click Validate to double-check that the conversion was successful and there was no pixel data loss.
+3. Click Convert to compress the raw data into a lossless mkv video
+4. Click Validate to double-check that the conversion was successful and there was no pixel data loss
 5. Safely delete your original image data
-6. Click Uncompress to convert the mkv back to an avi if necessary (for legacy hardware/software like ImageJ).
+6. Click Uncompress to convert the mkv back to an avi if necessary (for legacy hardware/software like ImageJ)
 
 ---
 
