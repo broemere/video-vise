@@ -7,8 +7,8 @@ Usage:
     python video_vise.py
 
 Author: Eli Broemer
-Created: 2025-04-29
-Version: 1.2.1
+Created: 2025-09-09
+Version: 1.2.2
 
 Dependencies:
     - Python >= 3.11
