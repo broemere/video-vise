@@ -23,6 +23,7 @@ import re
 import sys
 import psutil
 import logging
+from logging.handlers import RotatingFileHandler
 import datetime
 import traceback
 import threading
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QAbstractItemView, QLabel, QStyle, QSplashScreen, QMessageBox
 )
 from PySide6.QtGui import QPalette, QPixmap, QIcon, QColor, QBrush
-from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
 import json
 from tifffile import TiffFile, imread
 from fractions import Fraction
@@ -81,23 +82,40 @@ def get_exe(name_base: str) -> str:
 
 
 icon_path = resource_path("icons", "app.ico")
-FFMPEG   = get_exe('ffmpeg')
-FFPROBE  = get_exe('ffprobe')
-print(FFMPEG)
 # endregion
 
 # region ─────────── configure logging ───────────
+MAX_LOG_SIZE = 5 * 1024 * 1024  # 5 MB
+BACKUP_COUNT = 1                 # Keeps one file (e.g., app_debug.log.1)
 LOGNAME = f"{APP_NAME.replace(' ', '_').lower()}_debug.log"
 LOGFILE = resource_path(LOGNAME)
-if getattr(sys, "frozen", False):     # when frozen, only log to file (no console output)
+if getattr(sys, "frozen", False):
     LOGFILE = Path(LOGFILE).parent.parent / LOGNAME
-    handlers = [logging.FileHandler(str(LOGFILE), mode="w", encoding="utf-8")]
-else:    # in dev mode, log to file AND stderr
-    handlers = [logging.FileHandler(str(LOGFILE), mode="w", encoding="utf-8"), logging.StreamHandler(sys.stderr)]
+    file_handler = RotatingFileHandler(
+        str(LOGFILE),
+        mode="a",  # Append mode is crucial for rotation
+        maxBytes=MAX_LOG_SIZE,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8"
+    )
+    handlers = [file_handler]
+else:
+    file_handler = RotatingFileHandler(
+        str(LOGFILE),
+        mode="a",  # Append mode
+        maxBytes=MAX_LOG_SIZE,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8"
+    )
+    handlers = [file_handler, logging.StreamHandler(sys.stderr)]  # Also log to stderr in dev
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(threadName)s] %(levelname)s: %(message)s", handlers=handlers)
 logger = logging.getLogger(__name__)
 print(f"Logging to {LOGFILE}")
 # endregion ───────────────────────────────────────────
+
+FFMPEG   = get_exe('ffmpeg')
+FFPROBE  = get_exe('ffprobe')
+logger.info(f"ffmpeg found: {FFMPEG}")
 
 
 class FFmpegConverter(QThread):
@@ -158,7 +176,6 @@ class FFmpegConverter(QThread):
             "-slicecrc", "1",
             str(self.output_path)
         ]
-        print("Running compress command:", " ".join(cmd))
         logger.info("Spawning FFmpeg process: " + " ".join(cmd))
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         logger.debug(f"Launched FFmpeg (PID={proc.pid})")
@@ -211,7 +228,6 @@ class FFmpegConverter(QThread):
                     fps = 1.0 / median_dt
                     logger.info(f"Derived frame rate from deviceTime: {fps}")
                 else:
-                    print(f"Cannot parse frame rate from this tif, falling back to default {DEFAULT_FPS}")
                     logger.debug(f"Cannot parse frame rate from this tif, falling back to default {DEFAULT_FPS}")
 
             # ensure non-negative
@@ -235,8 +251,7 @@ class FFmpegConverter(QThread):
 
     def _process_video(self, frame_re, threads: int, slices: int):
         cmd = self._build_video_cmd(threads, slices)
-        print(f"Running {'compress' if self.mode=='compress' else 'uncompress'} command:", " ".join(cmd))
-        logger.info("Spawning FFmpeg process: " + " ".join(cmd))
+        logger.info(f"Spawning FFmpeg {'compress' if self.mode=='compress' else 'uncompress'} process: " + " ".join(cmd))
 
         proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True)
         logger.debug(f"Launched FFmpeg (PID={proc.pid})")
@@ -326,12 +341,12 @@ class FrameValidator(QThread):
                 f"FrameValidator result: is_lossless={is_lossless} "
                 f"(orig_frames={len(orig_hashes)} vs comp_frames={len(comp_hashes)})"
             )
-            self.result.emit(self.comp.name, is_lossless)
+            self.result.emit(str(self.comp), is_lossless)
 
         except Exception:
             logger.error("Exception in FrameValidator.run()", exc_info=True)
             # ensure UI doesn’t hang
-            self.result.emit(self.comp.name, False)
+            self.result.emit(str(self.comp), False)
 
         finally:
             logger.debug("FrameValidator thread END")
@@ -350,7 +365,7 @@ class FrameValidator(QThread):
         hashes = []
 
         def run_cmd(cmd, pct_start, pct_end, max_frames=None):
-            print(cmd)
+            logger.info(f"Hash cmd: {cmd}")
             proc = subprocess.Popen(cmd,
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL,
@@ -437,7 +452,7 @@ class FrameValidator(QThread):
                 "-vf", f"format={pix_fmt}",
                 "-f", "framemd5", "pipe:1"
             ]
-            print(cmd)
+            logger.info(f"Hash cmd: {cmd}")
 
             proc = subprocess.Popen(cmd,
                                     stdin=subprocess.PIPE,
@@ -533,7 +548,6 @@ class FrameValidator(QThread):
             line = raw.decode("utf-8", "ignore")
             if not line.startswith("#"):
                 hashes.append(line.rsplit(",", 1)[-1].strip())
-
 
 class PixelLoaderThread(QThread):
     # emits (fp, small_frame)
@@ -648,6 +662,12 @@ class MainWindow(QMainWindow):
         self.storage_path = None
         self.active_threads = []   # keep threads alive
         self.active_dialogs = []   # keep dialogs alive
+        self.EXT_COLOR = {
+            ".tif": "#4e84af",  # FIJI/ImageJ color
+            ".tiff": "#4e84af",
+            ".avi": "#FFB900",  # burnt orange (#FF5500)
+            ".mkv": "#9c27b0",  # deep purple (lighter: #9575cd)
+        }
         self.init_ui()
         last = self.settings.value("lastFolder", "")
         if last and os.path.isdir(last):
@@ -722,16 +742,16 @@ class MainWindow(QMainWindow):
     def init_storage_tracking(self):
         # Use POSIX‐style separator here; pathlib will convert as needed on Windows.
         self.tracker_file = "Lab/Software/storage_saved.jsonl"
-        print(f"Looking for '{self.tracker_file}' on network drives…")
+        logger.info(f"Looking for '{self.tracker_file}' on network drives…")
         matches = find_file_on_network_drives(self.tracker_file)
         if matches:
             print("  → Found:", matches[0])
             self.tracker_file = matches[0]
         else:
-            print("  → File not found on network, tracking disabled\n")
+            logger.info("  → File not found on network, tracking disabled\n")
         self.load_storage_jsonl(self.tracker_file)
         if self.track_storage:
-            print("Tracking storage savings\n")
+            logger.info("Tracking storage savings\n")
             self.gb_saved.setText(f"{self.get_gb_saved()} GB saved")
 
     def flash_window(self):
@@ -793,7 +813,7 @@ class MainWindow(QMainWindow):
         elif mode == "validate":
             exts = ["mkv"]
         files = [
-            p for p in folder_path.iterdir()
+            p for p in folder_path.rglob('*')
             if p.is_file() and p.suffix.lower().lstrip('.') in exts
         ]
         return sorted(
@@ -893,44 +913,272 @@ class MainWindow(QMainWindow):
     def update_progress(self, val: int):
         self.progress.setValue(val)
 
+    # def update_table(self, folder: str):
+    #     if not folder or not os.path.isdir(folder): return
+    #     self.status.setText("Refreshing...")
+    #     self.progress.setValue(0)
+    #     self.table.clearContents()
+    #     QApplication.processEvents()
+    #
+    #     files = self.get_files(folder)
+    #     print(files)
+    #     self.table.setRowCount(len(files))
+    #     QApplication.processEvents()
+    #
+    #     ext_color = {
+    #         ".tif": "#4e84af",  # FIJI/ImageJ color
+    #         ".tiff": "#4e84af",
+    #         ".avi": "#FFB900",  # burnt orange (#FF5500)
+    #         ".mkv": "#9c27b0",  # deep purple (lighter: #9575cd)
+    #     }
+    #
+    #     for r, fp in enumerate(files):
+    #         info = get_video_info(fp)
+    #         codec = info.get("codec_name", "Unknown")
+    #         # — Column 0: Color swatch
+    #         color_item = QTableWidgetItem()
+    #         hexcol = ext_color.get(fp.suffix.lower())
+    #         if hexcol:
+    #             color_item.setBackground(QBrush(QColor(hexcol)))
+    #         self.table.setItem(r, 0, color_item)
+    #         self.table.setItem(r, 1, QTableWidgetItem(fp.name))
+    #         size_gb = fp.stat().st_size / 1024 ** 3
+    #         size_item = QTableWidgetItem(f"{size_gb:.2f}")
+    #         size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    #         self.table.setItem(r, 2, size_item)
+    #         created = datetime.datetime.fromtimestamp(fp.stat().st_ctime)
+    #         self.table.setItem(r, 3, QTableWidgetItem(created.strftime("%Y-%m-%d %H:%M:%S")))
+    #         dur = float(info.get("duration", "0"))
+    #         self.frames[fp.name] = int(info.get("frames", 0))
+    #         dur_str = str(datetime.timedelta(seconds=int(dur))) if dur else "N/A"
+    #         self.table.setItem(r, 4, QTableWidgetItem(dur_str))
+    #         self.table.setItem(r, 5, QTableWidgetItem(codec))
+    #         pix = info.get("pix_fmt", "Unknown")
+    #         self.table.setItem(r, 6, QTableWidgetItem(pix))
+    #         w = info.get("width", "0")
+    #         h = info.get("height", "0")
+    #         res = f"{w}x{h}" if w and h else "N/A"
+    #         self.table.setItem(r, 7, QTableWidgetItem(res))
+    #         tag = info.get("codec_tag_string", "")
+    #         if not re.match(r"^[A-Za-z0-9_.]+$", tag): tag = "N/A"
+    #         self.table.setItem(r, 8, QTableWidgetItem(tag))
+    #         color = "Gray" if "gray" in pix.lower() else "Color"
+    #         self.table.setItem(r, 9, QTableWidgetItem(color))
+    #         fps = info.get("fps", "0")
+    #         self.table.setItem(r, 10, QTableWidgetItem(fps))
+    #         # compress only if not ffv1
+    #         if codec != "ffv1":
+    #             btnc = QPushButton("Compress")
+    #             btnc.clicked.connect(lambda _, p=fp: self.start_convert(p, "compress"))
+    #             if codec == "mjpeg":  # Check for MJPEG (lossy compressed format, cannot compress more)
+    #                 btnc = QLabel("Already compressed")
+    #             if dur == 0 and codec == "Unknown" and float(w) == 0 and float(h) == 0:  # Check for a bad video file
+    #                 btnc = QLabel("Cannot read")
+    #                 btnc.setAlignment(Qt.AlignCenter)
+    #             self.table.setCellWidget(r, 11, btnc)
+    #         # Validate & uncompress for ffv1
+    #         if codec == "ffv1":
+    #             btnv = QPushButton("Validate")
+    #             btnv.clicked.connect(lambda _, p=fp: self.start_validate(p))
+    #             self.table.setCellWidget(r, 12, btnv)
+    #             btnd = QPushButton("Uncompress")
+    #             btnd.clicked.connect(lambda _, p=fp: self.start_convert(p, "uncompress"))
+    #             self.table.setCellWidget(r, 15, btnd)
+    #         # Lossless column: center-align icon
+    #         label = QLabel()
+    #         label.setAlignment(Qt.AlignCenter)
+    #         if fp.name in self.lossless_results:
+    #             ok = self.lossless_results[fp.name]
+    #             icon = self.style().standardIcon(QStyle.SP_DialogApplyButton) if ok else self.style().standardIcon(QStyle.SP_DialogCancelButton)
+    #             label.setPixmap(icon.pixmap(24, 24))
+    #         self.table.setCellWidget(r, 13, label)
+    #
+    #         # Size (%) vs original AVI
+    #         pct_item = QTableWidgetItem()
+    #         if fp.suffix.lower() == ".mkv":
+    #             avi_fp = fp.with_suffix(".avi")
+    #             tif_fp = fp.with_suffix(".tif")
+    #             tiff_fp = fp.with_suffix(".tiff")
+    #             if avi_fp.exists():
+    #                 mkv_size = fp.stat().st_size
+    #                 avi_size = avi_fp.stat().st_size
+    #                 pct = (mkv_size / avi_size * 100) if avi_size else 0
+    #                 pct_str = f"{pct:.0f}%"
+    #             elif tif_fp.exists():
+    #                 mkv_size = fp.stat().st_size
+    #                 tif_size = tif_fp.stat().st_size
+    #                 pct = (mkv_size / tif_size * 100) if tif_size else 0
+    #                 pct_str = f"{pct:.0f}%"
+    #             elif tiff_fp.exists():
+    #                 mkv_size = fp.stat().st_size
+    #                 tiff_size = tiff_fp.stat().st_size
+    #                 pct = (mkv_size / tiff_size * 100) if tiff_size else 0
+    #                 pct_str = f"{pct:.0f}%"
+    #             else:
+    #                 pct_str = "N/A"
+    #         else:
+    #             pct_str = ""
+    #         pct_item.setText(pct_str)
+    #         pct_item.setTextAlignment(Qt.AlignCenter)
+    #         self.table.setItem(r, 14, pct_item)
+    #
+    #         btni = QPushButton()
+    #         btni.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+    #         btni.setProperty("fp", fp)
+    #         btni.setProperty("width", w)
+    #         btni.setProperty("height", h)
+    #         btni.setProperty("pix_fmt", pix)
+    #         btni.clicked.connect(self.inspect_pixels)
+    #         btni.setStyleSheet("""
+    #             QPushButton {
+    #                 padding-top:    2px;
+    #                 padding-bottom: 2px;
+    #                 padding-left:   4px;
+    #                 padding-right:  4px;
+    #             }
+    #         """)
+    #         self.table.setCellWidget(r, 16, btni)
+    #
+    #         self.progress.setValue(int(100*(r/len(files))))
+    #
+    #     self.table.resizeColumnsToContents()
+    #     self.status.setText("Ready")
+    #     self.progress.setValue(0)
+    #     if self.track_storage:
+    #         self.gb_saved.setText(f"{int(self.get_gb_saved())} GB saved")
+    #     QApplication.processEvents()
+
     def update_table(self, folder: str):
-        if not folder or not os.path.isdir(folder): return
+        """
+        Updates the table with files, grouping them by subdirectory.
+        """
+        if not folder or not os.path.isdir(folder):
+            return
+
+        base_folder = Path(folder)
+
         self.status.setText("Refreshing...")
         self.progress.setValue(0)
         self.table.clearContents()
         QApplication.processEvents()
 
-        files = self.get_files(folder)
-        self.table.setRowCount(len(files))
+        files = self.get_files(folder)  # This now gets files recursively
+
+        # --- Group files by directory ---
+        files_by_dir = {}
+        for fp in files:
+            # Get the parent directory
+            parent_dir = fp.parent
+            if parent_dir not in files_by_dir:
+                files_by_dir[parent_dir] = []
+            files_by_dir[parent_dir].append(fp)
+
+        # --- Create the list of items to render (files + dir headers) ---
+        all_items_to_render = []
+
+        # 1. Add top-level files first (if any)
+        if base_folder in files_by_dir:
+            # Sort top-level files (using original sort logic if needed)
+            top_level_files = sorted(files_by_dir[base_folder], key=lambda p: p.name.lower())
+            all_items_to_render.extend(top_level_files)
+            del files_by_dir[base_folder]  # Remove from dict so we don't repeat
+
+        # 2. Add subdirectories and their files
+        # Sort directories by path for consistent order
+        sorted_dirs = sorted(files_by_dir.keys(), key=str)
+
+        for dir_path in sorted_dirs:
+            # Add the directory itself as a "header" row
+            # We use the relative path as a string to identify it
+            relative_dir = dir_path.relative_to(base_folder)
+            all_items_to_render.append(str(relative_dir))
+
+            # Sort files within this directory
+            files_in_dir = sorted(files_by_dir[dir_path], key=lambda p: p.name.lower())
+            all_items_to_render.extend(files_in_dir)
+
+        # --- Populate Table ---
+        self.table.setRowCount(len(all_items_to_render))
         QApplication.processEvents()
 
-        ext_color = {
-            ".tif": "#4e84af",  # FIJI/ImageJ color
-            ".tiff": "#4e84af",
-            ".avi": "#FFB900",  # burnt orange (#FF5500)
-            ".mkv": "#9c27b0",  # deep purple (lighter: #9575cd)
-        }
+        # Keep track of file progress (not row progress)
+        file_progress_count = 0
+        num_files_total = len(files)
 
-        for r, fp in enumerate(files):
+        # Get style for folder icon
+        folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        # Define a background color for directory rows
+        dir_bg_color = QColor("#eeeeee")
+        pal = self.table.palette()
+        if pal.color(QPalette.Base).lightness() < 128:  # Dark theme
+            dir_bg_color = QColor("#424242")
+
+        for r, item in enumerate(all_items_to_render):
+
+            # --- Handle Directory Header Rows ---
+            if isinstance(item, str):
+                dir_path_str = item
+
+                # Column 0: Color swatch (empty)
+                color_item = QTableWidgetItem()
+                color_item.setBackground(dir_bg_color)
+                color_item.setFlags(Qt.ItemIsEnabled)  # Not selectable
+                self.table.setItem(r, 0, color_item)
+
+                # Column 1: Directory Name
+                dir_item = QTableWidgetItem(f" {dir_path_str}{os.sep}")  # Add trailing slash
+                dir_item.setIcon(folder_icon)
+                dir_item.setBackground(dir_bg_color)
+                dir_item.setFlags(Qt.ItemIsEnabled)
+                dir_item.setForeground(pal.color(QPalette.Text))
+                self.table.setItem(r, 1, dir_item)
+
+                # Span the directory name across remaining columns
+                self.table.setSpan(r, 1, 1, self.table.columnCount() - 1)
+                continue  # Skip to next row
+
+            # --- Handle File Rows (item is a Path object) ---
+            fp = item
+
+            # Use full path string as key to prevent name collisions
+            fp_key = str(fp)
+
+            # Get relative path for display in filename column
+            display_name = fp.name  # Fallback
+
             info = get_video_info(fp)
             codec = info.get("codec_name", "Unknown")
+
             # — Column 0: Color swatch
             color_item = QTableWidgetItem()
-            hexcol = ext_color.get(fp.suffix.lower())
+            hexcol = self.EXT_COLOR.get(fp.suffix.lower())
             if hexcol:
                 color_item.setBackground(QBrush(QColor(hexcol)))
             self.table.setItem(r, 0, color_item)
-            self.table.setItem(r, 1, QTableWidgetItem(fp.name))
+
+            # — Column 1: Filename (now relative path)
+            display_item = QTableWidgetItem(display_name)
+            display_item.setData(Qt.UserRole, fp_key) # <-- ADD THIS LINE
+            self.table.setItem(r, 1, display_item)
+
+            # — Column 2: Size
             size_gb = fp.stat().st_size / 1024 ** 3
             size_item = QTableWidgetItem(f"{size_gb:.2f}")
             size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(r, 2, size_item)
+
+            # — Column 3: Created
             created = datetime.datetime.fromtimestamp(fp.stat().st_ctime)
             self.table.setItem(r, 3, QTableWidgetItem(created.strftime("%Y-%m-%d %H:%M:%S")))
+
+            # — Column 4: Duration
             dur = float(info.get("duration", "0"))
-            self.frames[fp.name] = int(info.get("frames", 0))
+            # *** Use fp_key for dictionary ***
+            self.frames[fp_key] = int(info.get("frames", 0))
             dur_str = str(datetime.timedelta(seconds=int(dur))) if dur else "N/A"
             self.table.setItem(r, 4, QTableWidgetItem(dur_str))
+
+            # — Column 5-10: Video Info
             self.table.setItem(r, 5, QTableWidgetItem(codec))
             pix = info.get("pix_fmt", "Unknown")
             self.table.setItem(r, 6, QTableWidgetItem(pix))
@@ -945,17 +1193,20 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 9, QTableWidgetItem(color))
             fps = info.get("fps", "0")
             self.table.setItem(r, 10, QTableWidgetItem(fps))
-            # compress only if not ffv1
+
+            # — Column 11: Compress Button
             if codec != "ffv1":
                 btnc = QPushButton("Compress")
                 btnc.clicked.connect(lambda _, p=fp: self.start_convert(p, "compress"))
-                if codec == "mjpeg":  # Check for MJPEG (lossy compressed format, cannot compress more)
+                if codec == "mjpeg":
                     btnc = QLabel("Already compressed")
-                if dur == 0 and codec == "Unknown" and float(w) == 0 and float(h) == 0:  # Check for a bad video file
+                    btnc.setAlignment(Qt.AlignCenter)
+                if dur == 0 and codec == "Unknown" and float(w) == 0 and float(h) == 0:
                     btnc = QLabel("Cannot read")
                     btnc.setAlignment(Qt.AlignCenter)
                 self.table.setCellWidget(r, 11, btnc)
-            # Validate & uncompress for ffv1
+
+            # — Column 12 & 15: Validate & Uncompress Buttons
             if codec == "ffv1":
                 btnv = QPushButton("Validate")
                 btnv.clicked.connect(lambda _, p=fp: self.start_validate(p))
@@ -963,44 +1214,47 @@ class MainWindow(QMainWindow):
                 btnd = QPushButton("Uncompress")
                 btnd.clicked.connect(lambda _, p=fp: self.start_convert(p, "uncompress"))
                 self.table.setCellWidget(r, 15, btnd)
-            # Lossless column: center-align icon
+
+            # — Column 13: Lossless Icon
             label = QLabel()
             label.setAlignment(Qt.AlignCenter)
-            if fp.name in self.lossless_results:
-                ok = self.lossless_results[fp.name]
-                icon = self.style().standardIcon(QStyle.SP_DialogApplyButton) if ok else self.style().standardIcon(QStyle.SP_DialogCancelButton)
+            # *** Use fp_key for dictionary ***
+            if fp_key in self.lossless_results:
+                ok = self.lossless_results[fp_key]
+                icon = self.style().standardIcon(QStyle.SP_DialogApplyButton if ok else QStyle.SP_DialogCancelButton)
                 label.setPixmap(icon.pixmap(24, 24))
             self.table.setCellWidget(r, 13, label)
 
-            # Size (%) vs original AVI
+            # — Column 14: Relative Size
             pct_item = QTableWidgetItem()
+            pct_str = ""
             if fp.suffix.lower() == ".mkv":
+                # Check for source files in the *same directory*
                 avi_fp = fp.with_suffix(".avi")
                 tif_fp = fp.with_suffix(".tif")
                 tiff_fp = fp.with_suffix(".tiff")
+
+                source_fp = None
                 if avi_fp.exists():
-                    mkv_size = fp.stat().st_size
-                    avi_size = avi_fp.stat().st_size
-                    pct = (mkv_size / avi_size * 100) if avi_size else 0
-                    pct_str = f"{pct:.0f}%"
+                    source_fp = avi_fp
                 elif tif_fp.exists():
-                    mkv_size = fp.stat().st_size
-                    tif_size = tif_fp.stat().st_size
-                    pct = (mkv_size / tif_size * 100) if tif_size else 0
-                    pct_str = f"{pct:.0f}%"
+                    source_fp = tif_fp
                 elif tiff_fp.exists():
+                    source_fp = tiff_fp
+
+                if source_fp:
                     mkv_size = fp.stat().st_size
-                    tiff_size = tiff_fp.stat().st_size
-                    pct = (mkv_size / tiff_size * 100) if tiff_size else 0
+                    source_size = source_fp.stat().st_size
+                    pct = (mkv_size / source_size * 100) if source_size else 0
                     pct_str = f"{pct:.0f}%"
                 else:
                     pct_str = "N/A"
-            else:
-                pct_str = ""
+
             pct_item.setText(pct_str)
             pct_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(r, 14, pct_item)
 
+            # — Column 16: Inspect Button
             btni = QPushButton()
             btni.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
             btni.setProperty("fp", fp)
@@ -1008,19 +1262,21 @@ class MainWindow(QMainWindow):
             btni.setProperty("height", h)
             btni.setProperty("pix_fmt", pix)
             btni.clicked.connect(self.inspect_pixels)
-            btni.setStyleSheet("""
-                QPushButton {
-                    padding-top:    2px;
-                    padding-bottom: 2px;
-                    padding-left:   4px;
-                    padding-right:  4px;
-                }
-            """)
+            btni.setStyleSheet(
+                "QPushButton { padding-top: 2px; padding-bottom: 2px; padding-left: 4px; padding-right: 4px; }")
             self.table.setCellWidget(r, 16, btni)
 
-            self.progress.setValue(int(100*(r/len(files))))
+            # Update progress based on files processed
+            file_progress_count += 1
+            if num_files_total > 0:
+                self.progress.setValue(int(100 * (file_progress_count / num_files_total)))
 
         self.table.resizeColumnsToContents()
+        # Ensure the spanned directory row also resizes
+        for r in range(self.table.rowCount()):
+            if self.table.columnSpan(r, 1) > 1:
+                self.table.setRowHeight(r, self.table.rowHeight(r))  # Trigger redraw/resize
+
         self.status.setText("Ready")
         self.progress.setValue(0)
         if self.track_storage:
@@ -1049,7 +1305,7 @@ class MainWindow(QMainWindow):
     def start_convert(self, fp: Path, mode: str):
         if mode == "compress":
             out_fp = fp.with_name(fp.stem + ".mkv")
-            nframes = self.frames[fp.name]
+            nframes = self.frames[str(fp)]
         else:
             stem = fp.stem
             out_fp = fp.with_name(fp.stem + "_RAW.avi")
@@ -1076,7 +1332,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.error(f"Failed to estiamte frames: {e}", exc_info=True)
 
-        self.status.setText(f"{mode.title()}ing {fp.name}")
+        self.status.setText(f"{mode.title()}ing {fp}")
         self.progress.setValue(0)
         self.worker = FFmpegConverter(fp, out_fp, nframes, mode, self.track_storage)
         self.worker.progress.connect(self.update_progress)
@@ -1092,29 +1348,52 @@ class MainWindow(QMainWindow):
                 self.gb_saved.setText(f"{self.get_gb_saved()} GB saved")
                 self.add_member_jsonl(key_name, result)
 
+    def on_conversion_complete_and_continue(self, key_name: str, result: int):
+        # Step 1: Call the original result handler to update the UI
+        self.on_conversion_result(key_name, result)
+        # Step 2: Now that the UI is updated, manually trigger the next batch item
+        self._run_next_batch()
+
     def start_validate(self, fp: Path):
         orig_fp = find_original_file(fp)
-        nframes = self.frames[orig_fp.name]
-        self.status.setText(f"Validating {fp.name} against {orig_fp.name}")
-        self.progress.setValue(0)
-        self.worker = FrameValidator(orig_fp, fp, nframes)
-        self.worker.progress.connect(self.update_progress)
-        self.worker.result.connect(self.on_validation_result)
-        self.worker.start()
+        print(fp)
+        print(orig_fp)
+        if orig_fp is not None:
+            nframes = self.frames[str(orig_fp)]
+            self.status.setText(f"Validating {fp} against {orig_fp}")
+            self.progress.setValue(0)
+            self.worker = FrameValidator(orig_fp, fp, nframes)
+            self.worker.progress.connect(self.update_progress)
+            self.worker.result.connect(self.on_validation_result)
+            self.worker.start()
+        else:
+            logger.error(f"File does not exist: {orig_fp}")
 
     def on_validation_result(self, filename: str, ok: bool):
         self.lossless_results[filename] = ok
+        print(f"Validated name: {filename}")
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 1)
-            if item and item.text() == filename:
+            if item and item.data(Qt.UserRole) == filename:
+                # --- Found the correct row ---
+                # Create the icon label
                 label = QLabel()
                 label.setAlignment(Qt.AlignCenter)
-                icon = self.style().standardIcon(QStyle.SP_DialogApplyButton) if ok else self.style().standardIcon(QStyle.SP_DialogCancelButton)
+                icon = self.style().standardIcon(QStyle.SP_DialogApplyButton if ok else QStyle.SP_DialogCancelButton)
                 label.setPixmap(icon.pixmap(24, 24))
+                # Set the widget in the "Lossless" column (13)
                 self.table.setCellWidget(r, 13, label)
+                # We found our row, no need to loop further
+                QApplication.processEvents()
                 break
         self.status.setText("Ready")
         self.progress.setValue(0)
+
+    def on_validation_complete_and_continue(self, filename: str, ok: bool):
+        # Step 1: Call the original result handler to update the UI
+        self.on_validation_result(filename, ok)
+        # Step 2: Now that the UI is updated, manually trigger the next batch item
+        self._run_next_batch()
 
     # Batch processing logic
     def process_all_compress(self):
@@ -1203,29 +1482,44 @@ class MainWindow(QMainWindow):
 
         fp, mode = self.batch_queue.pop(0)
         idx = self.total_tasks - len(self.batch_queue)
-        logger.debug(f"_run_next_batch: dispatching task {idx}/{self.total_tasks}: {mode} '{fp.name}'")
-        self.status.setText(f"{mode.title() if mode == 'compress' else mode.title()[:-1]}ing {fp.name} ({idx}/{self.total_tasks})")
-        nframes = self.frames[fp.name]
+        logger.debug(f"_run_next_batch: dispatching task {idx}/{self.total_tasks}: {mode} '{fp}'")
+        self.status.setText(f"{mode.title() if mode == 'compress' else mode.title()[:-1]}ing {fp} ({idx}/{self.total_tasks})")
+        nframes = self.frames[str(fp)]
+        worker = None
         # Create our new worker
         if mode in ("compress", "uncompress"):
             out_fp = (fp.with_suffix(".mkv") if mode == "compress" else fp.with_suffix(".avi"))
             worker = FFmpegConverter(fp, out_fp, nframes, mode, self.track_storage)
-            logger.debug(f"_run_next_batch: created FFmpegConverter for {fp.name} → out {out_fp.name}")
-            worker.result.connect(self.on_conversion_result)
-            worker.finished.connect(self._run_next_batch)
+            logger.debug(f"_run_next_batch: created FFmpegConverter for {fp} → out {out_fp}")
+            worker.result.connect(self.on_conversion_complete_and_continue)
+            #worker.finished.connect(self._run_next_batch)
         else:  # mode == "validate"
             orig = find_original_file(fp)
-            nframes = self.frames[orig.name]
-            worker = FrameValidator(orig, fp, nframes)
-            logger.debug(f"_run_next_batch: created FrameValidator for {fp.name}")
-            worker.result.connect(self.on_validation_result)
-            worker.finished.connect(self._run_next_batch)
+            if orig is None:
+                logger.warning(f"Could not find original file for '{fp.name}'. Skipping validation.")
+            else:
+                nframes = self.frames[str(orig)]
+                worker = FrameValidator(orig, fp, nframes)
+                logger.debug(f"_run_next_batch: created FrameValidator for {fp}")
+                worker.result.connect(self.on_validation_complete_and_continue)
+                #worker.finished.connect(self._run_next_batch)
 
         # Hold a reference so it won’t be garbage‐collected
-        self.worker = worker
-        worker.progress.connect(self.progress.setValue)
-        logger.debug("_run_next_batch: Starting worker thread")
-        worker.start()
+        if worker:
+            self.worker = worker
+            worker.progress.connect(self.progress.setValue)
+            logger.debug("_run_next_batch: Starting worker thread")
+            worker.start()
+        else:
+            # No worker was created (e.g., validation skipped because orig=None)
+            # We MUST call _run_next_batch() again to continue the queue.
+            logger.debug("_run_next_batch: No worker created, moving to next task.")
+
+            # IMPORTANT: Call this via QTimer.singleShot(0, ...)
+            # This posts the call to the event loop instead of
+            # calling it directly, which prevents a "recursion"
+            # error if many files are skipped in a row.
+            QTimer.singleShot(0, self._run_next_batch)
 
 # region ─────────── Video Scanners ───────────
 
@@ -1466,7 +1760,6 @@ def find_original_file(base_fp: Path, exts = ('avi', 'tif', 'tiff')):
     for ext in exts:
         candidate = stem.with_suffix(f".{ext}")
         if candidate.exists():
-            print(f"Found original file {candidate}")
             logger.info(f"Found original file {candidate}")
             return candidate
     return None
