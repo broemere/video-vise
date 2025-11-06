@@ -42,7 +42,7 @@ from fractions import Fraction
 from statistics import median
 
 APP_NAME = "VideoVise"
-__version__ = "1.2.2"
+__version__ = "1.2.2"  # Update metadata!!
 supported_extensions = ["avi", "tif", "tiff", "mkv"]
 DEFAULT_FPS = 10  # Make this a user settable option in the UI?
 
@@ -1432,20 +1432,27 @@ def find_file_on_network_drives(relative_path: str):
     found_paths = []
     rel = PurePath(relative_path)        # Treat input as “POSIX‐style” components
     for d in list_network_drives():
-        mount = d["mountpoint"]
-        # Build the candidate path via pathlib
-        candidate = Path(mount) / rel
-        # candidate.resolve() will normalize things: e.g. convert "C:/" or resolve symlinks
         try:
-            candidate = candidate.resolve(strict=False)
-        except Exception:
-            # In some rare cases (e.g. the network drive is offline), .resolve() might fail.
-            # We'll just keep the un‐resolved Path then.
-            pass
-        # Convert to string in OS-native form:
-        candidate_str = str(candidate)
-        if candidate.is_file():
-            found_paths.append(candidate_str)
+            mount = d["mountpoint"]
+            # Build the candidate path via pathlib
+            candidate = Path(mount) / rel
+            # candidate.resolve() will normalize things: e.g. convert "C:/" or resolve symlinks
+            try:
+                candidate = candidate.resolve(strict=False)
+            except Exception:
+                # In some rare cases (e.g. the network drive is offline), .resolve() might fail.
+                # We'll just keep the un‐resolved Path then.
+                pass
+            # Convert to string in OS-native form:
+            candidate_str = str(candidate)
+            if candidate.is_file():
+                found_paths.append(candidate_str)
+        except OSError as e:
+            # This will catch [WinError 1326] (which is an OSError),
+            # "Permission denied" on macOS/Linux, and other OS-level access errors.
+            # We will simply "disregard the drive" by continuing to the next one.
+            logger.info(f"Skipping {d.get('mountpoint')}, due to access error: {e}")
+            continue
     return found_paths
 
 def find_original_file(base_fp: Path, exts = ('avi', 'tif', 'tiff')):
