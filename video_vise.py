@@ -7,8 +7,8 @@ Usage:
     python video_vise.py
 
 Author: Eli Broemer
-Created: 2025-09-09
-Version: 1.2.2
+Created: 2025-06-11
+Version: 1.3
 
 Dependencies:
     - Python >= 3.11
@@ -43,7 +43,7 @@ from fractions import Fraction
 from statistics import median
 
 APP_NAME = "VideoVise"
-__version__ = "1.2.2"  # Update metadata!!
+__version__ = "1.3"  # Update metadata!!
 supported_extensions = ["avi", "tif", "tiff", "mkv"]
 DEFAULT_FPS = 10  # Make this a user settable option in the UI?
 
