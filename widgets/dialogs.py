@@ -90,7 +90,7 @@ class PixelLoaderThread(QThread):
                 ]
         else:
             cmd = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                FFMPEG, "-hide_banner", "-loglevel", "error",
                 "-ss", "0",
                 "-i", str(self.fp),
                 "-frames:v", "1",

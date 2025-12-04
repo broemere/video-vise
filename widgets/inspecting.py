@@ -305,7 +305,7 @@ def inspect_tiff(fp: Path) -> dict[str, any]:
 def inspect_ffprobe(fp: Path) -> dict[str, any]:
     # Run command (Fast, header read only)
     args = [
-        "ffprobe", "-v", "error",
+        FFPROBE, "-v", "error",
         "-show_format", "-show_streams",
         "-of", "json",
         str(fp)
