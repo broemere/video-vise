@@ -46,12 +46,30 @@ class FrameValidator(QThread):
             actual_comp_frames = int(comp_info.get("frames", 0))
 
             if actual_comp_frames != self.frames:
-                logger.error(
-                    f"Frame count mismatch! Target: {self.frames}, "
-                    f"Actual MKV: {actual_comp_frames}. Validation failed."
+                logger.warning(
+                    f"Frame count mismatch detected! Header Expected: {self.frames}, "
+                    f"MKV Actual: {actual_comp_frames}. Initiating Deep Scan..."
                 )
-                self.result.emit(str(self.comp), False)
-                return
+
+                # --- NEW LOGIC START ---
+                # The header might be lying (truncated source). Check the PHYSICAL source frames.
+                true_orig_frames = self._deep_scan_frame_count(self.orig)
+
+                if actual_comp_frames == true_orig_frames:
+                    logger.info(
+                        f"Deep Scan Rescue: Source file is truncated/corrupt but conversion preserved all valid data. "
+                        f"Updating expected frames from {self.frames} to {true_orig_frames}."
+                    )
+                    # Update our expectation to match reality so the hashing logic works correctly
+                    self.frames = true_orig_frames
+                else:
+                    # Genuine failure: The output has different frames than the source (even after deep scanning)
+                    logger.error(
+                        f"Validation Failed: Mismatch persists after deep scan. "
+                        f"Source Physical: {true_orig_frames}, MKV Actual: {actual_comp_frames}."
+                    )
+                    self.result.emit(str(self.comp), False)
+                    return
 
             comp_hashes = self._hash_file(self.comp, 0, 50)
             orig_hashes = self._hash_file(self.orig, 50, 100, is_original=True)
@@ -245,3 +263,34 @@ class FrameValidator(QThread):
             line = raw.decode("utf-8", "ignore")
             if not line.startswith("#"):
                 hashes.append(line.rsplit(",", 1)[-1].strip())
+
+    def _deep_scan_frame_count(self, path: Path) -> int:
+        """
+        Runs a full decode scan on the file to count actual physically present frames.
+        Used when header metadata contradicts the converted output.
+        """
+        try:
+            # -count_frames forces decoding of the entire stream
+            # -show_entries stream=nb_read_frames gets the result
+            cmd = [
+                FFPROBE, "-v", "error",
+                "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=nb_read_frames",
+                "-of", "csv=p=0",
+                str(path)
+            ]
+
+            # NOTE: This operation is blocking and may take time for large files,
+            # but it is only triggered in error states.
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=True, encoding="utf-8"
+            )
+
+            # Output should be a single number like "145"
+            count = result.stdout.strip()
+            return int(count) if count.isdigit() else 0
+
+        except Exception as e:
+            logger.error(f"Deep scan failed for {path}: {e}")
+            return 0
