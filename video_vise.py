@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         self.lossless_results = {}
         self.durations = {}
         self.frames = {}
+        self.codecs = {}
         self.cancel_requested = False
         self.num_compress = 0
         self.tracker = StorageTracker()
@@ -260,6 +261,7 @@ class MainWindow(QMainWindow):
             codec = info.get("codec_name", "-")
             if codec == "Unknown":
                 codec = "-"
+            self.codecs[fp_key] = codec  # Cache global
 
             # — Column 0: Color swatch
             color_item = QTableWidgetItem()
@@ -541,7 +543,7 @@ class MainWindow(QMainWindow):
     def process_all_compress(self):
         folder = self.path_edit.text()
         files = get_files(folder, "compress")
-        tasks = [(fp, 'compress') for fp in files if self.frames.get(str(fp), 0) > 1]
+        tasks = [(fp, 'compress') for fp in files if self.frames.get(str(fp), 0) > 1 and self.codecs.get(str(fp), "") != "mjpeg"]
         self.start_batch(tasks)
 
     def process_all_uncompress(self):
@@ -560,7 +562,7 @@ class MainWindow(QMainWindow):
     def process_all_compress_validate(self):
         folder = self.path_edit.text()
         files = get_files(folder, "compress")
-        compress_tasks = [(fp, 'compress') for fp in files if self.frames.get(str(fp), 0) > 1]
+        compress_tasks = [(fp, 'compress') for fp in files if self.frames.get(str(fp), 0) > 1 and self.codecs.get(str(fp), "") != "mjpeg"]
         self.num_compress = len(compress_tasks)
         validate_tasks = [(fp.with_name(fp.stem + '.mkv'), 'validate') for fp, _ in compress_tasks]
         self.start_batch(compress_tasks + validate_tasks)

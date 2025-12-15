@@ -27,12 +27,17 @@ class FrameValidator(QThread):
         self.frames = frames
         self.step_pct = 3
         self.PREFIX = 50
-        if orig.suffix.lower() in ['.tif', '.tiff']:
-            info = get_video_info(orig)
-        else:
-            info = get_video_info(orig)
+        info = get_video_info(orig)
+        source_fmt = info.get("pix_fmt", "gray")
 
-        self.target_pix_fmt = info.get("pix_fmt", "gray")
+        # 2. Determine if we need to force a common format for comparison
+        # If it's pal8, indices are unreliable, so we force both to rgb24.
+        if source_fmt == "pal8":
+            self.target_pix_fmt = "rgb24"
+            self.force_conversion = True
+        else:
+            self.target_pix_fmt = source_fmt
+            self.force_conversion = False
         logger.debug(f"Validator: Target format {self.target_pix_fmt}, Expecting Frames: {self.frames}")
 
         logger.debug(f"Validator determined target format for {orig.name}: {self.target_pix_fmt}")
@@ -109,8 +114,10 @@ class FrameValidator(QThread):
         hashes = []
         vf_chain = []
 
-        if not is_original:
+        if not is_original or self.force_conversion:
             vf_chain.append(f"format={self.target_pix_fmt}")
+            logger.debug(
+                f"Applying filter 'format={self.target_pix_fmt}' to {'original' if is_original else 'compressed'} stream")
 
         def run_hash_cmd(args, current_start_pct, current_end_pct, expected_frames):
             logger.info(f"Hash cmd: {' '.join(args)}")
