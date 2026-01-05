@@ -15,10 +15,14 @@ A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV 
 
 ## Requirements
 
-- **Python 3.7+** with the following packages (see `requirements.txt`)  
-  - `psutil`  
-  - `PySide6`  
-  - `tifffile`  
+### Running app
+
+* Windows
+* Mac
+
+### Building app
+
+- **Python 3.7+** with the packages in `requirements.txt`
 - **FFmpeg & FFprobe** binaries  
   - Either on your system `PATH` (via your OS package manager)  
   - Or placed in a local `ffmpeg/` folder (see Installation)  
@@ -26,6 +30,14 @@ A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV 
 ---
 
 ## Installation
+
+### Direct run
+
+* Download and run the exe/dmg from https://github.com/broemere/video-vise/releases
+* Your OS may block the program the first time it is run.
+  `"Windows protected your PC` → `More info` → `Run anyway`
+
+### Building from source code
 
 ### 1. Clone the repository
 
