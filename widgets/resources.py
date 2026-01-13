@@ -46,9 +46,9 @@ def setup_logging():
     BACKUP_COUNT = 1                 # Keeps one file (e.g., app_debug.log.1)
     LOGNAME = f"{APP_NAME.replace(' ', '_').lower()}_debug.log"
     LOGFILE = resource_path(LOGNAME)
-    print(LOGFILE)
     if getattr(sys, "frozen", False):
         LOGFILE = Path(LOGFILE).parent.parent / LOGNAME
+        print(LOGFILE)
         file_handler = RotatingFileHandler(
             str(LOGFILE),
             mode="a",  # Append mode is crucial for rotation
@@ -58,6 +58,7 @@ def setup_logging():
         )
         handlers = [file_handler]
     else:
+        print(LOGFILE)
         file_handler = RotatingFileHandler(
             str(LOGFILE),
             mode="a",  # Append mode

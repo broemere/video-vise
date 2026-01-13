@@ -1,5 +1,5 @@
 APP_NAME = "VideoVise"
-version = "1.5"
+version = "1.4"
 ORG = "TykockiLab"
 EXT_COLOR = {
     ".tif": "#4e84af",  # FIJI/ImageJ color
@@ -9,3 +9,4 @@ EXT_COLOR = {
 }
 supported_extensions = ["avi", "tif", "tiff", "mkv"]
 DEFAULT_FPS = 10  # Make this a user settable option in the UI?
+REPO_URL = "https://github.com/broemere/video-vise/releases/latest"

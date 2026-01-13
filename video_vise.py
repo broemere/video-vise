@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
 )
 from widgets.file_scanning import find_file_on_network_drives, find_original_file, get_files, load_storage_jsonl
 from widgets.resources import setup_logging, icon_path
-from widgets.inspecting import get_video_info
+from widgets.inspecting import get_video_info, sample_tail_zeros
 from config import *
-from widgets.dialogs import PixelDialog, PixelLoaderThread, instructions
+from widgets.dialogs import PixelDialog, PixelLoaderThread, instructions, UpdateChecker
 from widgets.converter import FFmpegConverter
 from widgets.validator import FrameValidator
 from widgets.tracker import StorageTracker
@@ -54,6 +54,10 @@ class MainWindow(QMainWindow):
         if last and os.path.isdir(last):
             self.path_edit.setText(last)
             self.update_table(last)
+
+        self.update_checker = UpdateChecker()
+        self.update_checker.update_available.connect(self.on_update_available)
+        self.update_checker.start()  # Runs in background, won't freeze app
 
     def closeEvent(self, event):
         """
@@ -222,6 +226,7 @@ class MainWindow(QMainWindow):
         folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         # Define a background color for directory rows
         dir_bg_color = QColor("#eeeeee")
+        warning_color = QColor("#f54927")
         pal = self.table.palette()
         if pal.color(QPalette.Base).lightness() < 128:  # Dark theme
             dir_bg_color = QColor("#424242")
@@ -276,7 +281,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 1, display_item)
 
             # — Column 2: Size
-            size_gb = fp.stat().st_size / 1024 ** 3
+            size_logical = fp.stat().st_size
+            size_gb = size_logical / 1024 ** 3
             size_item = QTableWidgetItem(f"{size_gb:.2f}")
             size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(r, 2, size_item)
@@ -323,7 +329,10 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 10, QTableWidgetItem(fps))
 
             # — Column 11: Frames (NEW COLUMN)
-            self.table.setItem(r, 11, QTableWidgetItem(str(frames)))
+            frames_item = QTableWidgetItem(str(frames))
+            #frames_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(r, 11, frames_item)
+
 
             # — Column 12: Compress Button
             if codec != "ffv1":
@@ -381,6 +390,14 @@ class MainWindow(QMainWindow):
                 ok = self.lossless_results[fp_key]
                 icon = self.style().standardIcon(QStyle.SP_DialogApplyButton if ok else QStyle.SP_DialogCancelButton)
                 label.setPixmap(icon.pixmap(24, 24))
+            if codec == "rawvideo":
+                s = sample_tail_zeros(fp)
+                #print(fp.name, s)
+                if s["tail_zero"] >= 0.999 and s["near_tail_zero"] >= 0.999 and s["headish_zero"] <= 0.95:
+                # if size_physical / size_logical < 0.95:
+                    icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+                    label.setPixmap(icon.pixmap(24, 24))
+                    label.setToolTip("File is missing data/incomplete. Compressing will process all viable data.")
             self.table.setCellWidget(r, 14, label)
 
             # — Column 15: Relative Size
@@ -401,10 +418,23 @@ class MainWindow(QMainWindow):
                     source_fp = tiff_fp
 
                 if source_fp:
-                    mkv_size = fp.stat().st_size
                     source_size = source_fp.stat().st_size
-                    pct = (mkv_size / source_size * 100) if source_size else 0
+                    pct = (size_logical / source_size * 100) if source_size else 0
                     pct_str = f"{pct:.0f}%"
+
+                    # ---- NEW: Frame mismatch warning shading for Column 11 ----
+                    source_key = str(source_fp)
+                    src_frames = self.frames.get(source_key)
+
+                    # Only warn if we actually know the source frame count
+                    if isinstance(src_frames, int) and src_frames > 0:
+                        if frames != src_frames:
+                            frames_item.setBackground(QBrush(warning_color))
+                            frames_item.setToolTip(
+                                f"Frame mismatch vs source:\n"
+                                f"Source: {source_fp.name} = {src_frames}\n"
+                                f"Output: {fp.name} = {frames}"
+                            )
                 else:
                     pct_str = "N/A"
 

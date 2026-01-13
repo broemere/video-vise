@@ -11,6 +11,7 @@ from fractions import Fraction
 from logging.handlers import RotatingFileHandler
 from pathlib import Path, PurePath
 from statistics import median
+import urllib.request
 
 # Third-Party Imports
 from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
@@ -26,6 +27,9 @@ from widgets.file_scanning import find_file_on_network_drives, find_original_fil
 from widgets.resources import setup_logging, icon_path, FFMPEG, FFPROBE
 from widgets.inspecting import get_video_info
 from config import *
+
+
+log = logging.getLogger(__name__)
 
 
 instructions = (
@@ -155,3 +159,52 @@ class PixelDialog(QDialog):
         txt = "\n".join(str(row) for row in small_frame)
         layout.addWidget(QLabel(txt))
         self.setAttribute(Qt.WA_DeleteOnClose)
+
+
+class UpdateChecker(QThread):
+    """
+    Background thread to check for updates on GitHub.
+    Emits 'update_available' signal with the new version string if a newer version is found.
+    """
+    update_available = Signal(str)
+
+    def run(self):
+        try:
+            # We use urllib to avoid adding an external dependency like 'requests'
+            # The timeout ensures we don't hang indefinitely if the internet is flaky
+            with urllib.request.urlopen(REPO_URL, timeout=5) as response:
+                # GitHub redirects 'latest' to the specific tag URL.
+                # Example: .../releases/tag/v0.1
+                final_url = response.geturl()
+
+                # Extract the tag (the last part of the URL)
+                latest_tag = final_url.split('/')[-1]
+
+                if self._is_version_newer(latest_tag, version):
+                    self.update_available.emit(latest_tag)
+        except Exception as e:
+            # Log silently; we don't want to annoy the user if they are offline
+            log.warning(f"Update check failed: {e}")
+
+    def _is_version_newer(self, remote_tag: str, current_version: str) -> bool:
+        """
+        Compares two version strings (e.g., 'v0.1' vs '0.0.5').
+        Returns True if remote_tag is logically greater than current_version.
+        """
+        try:
+            # 1. Strip 'v' prefix and whitespace
+            r_clean = remote_tag.lower().lstrip('v').strip()
+            c_clean = current_version.lower().lstrip('v').strip()
+
+            # 2. Convert to tuples of integers for accurate comparison
+            # e.g. "0.1" -> (0, 1) and "0.0.5" -> (0, 0, 5)
+            # Python natively compares tuples element-by-element:
+            # (0, 1) > (0, 0, 5) evaluates to True because 1 > 0 at the second index.
+            remote_parts = tuple(map(int, r_clean.split('.')))
+            current_parts = tuple(map(int, c_clean.split('.')))
+
+            return remote_parts > current_parts
+        except ValueError:
+            # Failsafe for tags that aren't standard numbers (e.g., "beta-release")
+            log.warning(f"Could not parse version tags for comparison: {remote_tag} vs {current_version}")
+            return False

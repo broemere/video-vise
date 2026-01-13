@@ -7,6 +7,7 @@ from statistics import median
 from widgets.formatting import format_decimal, frac_to_float
 from widgets.resources import *
 
+
 # Map base format to ffmpeg pixel format string (partial), append 'le' or 'be' dynamically for 16-bit types
 BASE_TIFF_FMT = {
     "gray8": "gray",
@@ -368,4 +369,40 @@ def inspect_ffprobe(fp: Path) -> dict[str, any]:
         "fps": format_decimal(fps),  # formatted for display
         "raw_fps": fps,  # kept raw for math if needed
         "frames": nb_frames,
+    }
+
+def zero_fraction(buf: bytes) -> float:
+    if not buf:
+        return 1.0
+    return buf.count(0) / len(buf)
+
+def sample_tail_zeros(fp: Path, *, sample_size: int = 256 * 1024) -> dict:
+    """
+    Reads a few small windows. Designed to be fast even over SMB/NAS.
+    Returns a dict with zero fractions.
+    """
+    size = fp.stat().st_size
+    if size <= sample_size:
+        offsets = [0]
+    else:
+        offsets = sorted({
+            max(0, min(size - sample_size, 8 * 1024 * 1024)),        # after headers
+            max(0, min(size - sample_size, int(size * 0.50))),       # mid
+            max(0, min(size - sample_size, int(size * 0.90))),       # near end
+            max(0, size - sample_size),                              # very end
+        })
+
+    results = {}
+    with open(fp, "rb", buffering=0) as f:
+        for off in offsets:
+            f.seek(off)
+            buf = f.read(sample_size)
+            results[off] = zero_fraction(buf)
+
+    return {
+        "logical_size": size,
+        "samples": results,
+        "tail_zero": results[offsets[-1]],
+        "near_tail_zero": results[offsets[-2]] if len(offsets) >= 2 else results[offsets[-1]],
+        "headish_zero": results[offsets[0]],
     }
