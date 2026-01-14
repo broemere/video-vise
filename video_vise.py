@@ -6,9 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 import gc
+from random import sample
 
 # Third-Party Imports
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer, Slot
 from PySide6.QtGui import QBrush, QColor, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout,
@@ -41,6 +42,8 @@ class MainWindow(QMainWindow):
         self.durations = {}
         self.frames = {}
         self.codecs = {}
+        self.sizes = {}
+        self.video_info_cache: dict[str, dict] = {}
         self.cancel_requested = False
         self.num_compress = 0
         self.tracker = StorageTracker()
@@ -214,6 +217,45 @@ class MainWindow(QMainWindow):
             files_in_dir = sorted(files_by_dir[dir_path], key=lambda p: p.name.lower())
             all_items_to_render.extend(files_in_dir)
 
+
+        info_map: dict[str, dict] = {}
+        files_only: list[Path] = [x for x in all_items_to_render if isinstance(x, Path)]
+        tail_data = {}
+        source_map = {}
+
+        for i, fp in enumerate(files_only, 1):
+            fp_key = str(fp)
+
+            # You can optionally reuse cached results if you want
+            info = get_video_info(fp)
+            info_map[fp_key] = info
+
+            # Populate your global caches consistently
+            codec = info.get("codec_name", "-")
+            if codec == "Unknown":
+                codec = "-"
+            self.codecs[fp_key] = codec
+            if codec == "rawvideo":
+                tail_data[fp_key] = sample_tail_zeros(fp)
+
+            if codec == "ffv1":
+                source_map[fp_key] = find_original_file(fp, silence=True)
+            else:
+                source_map[fp_key] = None
+
+
+            frames = int(info.get("frames", 0) or 0)
+            self.frames[fp_key] = frames
+
+            self.sizes[fp_key] = fp.stat().st_size
+
+            # Progress: probing progress (not UI progress)
+            if len(files_only) > 0:
+                self.progress.setValue(int(100 * i / len(files_only)))
+                QApplication.processEvents()
+
+
+
         # --- Populate Table ---
         self.table.setRowCount(len(all_items_to_render))
         QApplication.processEvents()
@@ -262,7 +304,8 @@ class MainWindow(QMainWindow):
             # Get relative path for display in filename column
             display_name = fp.name  # Fallback
 
-            info = get_video_info(fp)
+            #info = get_video_info(fp)
+            info = info_map.get(fp_key, {})
             codec = info.get("codec_name", "-")
             if codec == "Unknown":
                 codec = "-"
@@ -281,7 +324,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 1, display_item)
 
             # — Column 2: Size
-            size_logical = fp.stat().st_size
+            size_logical = self.sizes[fp_key]
             size_gb = size_logical / 1024 ** 3
             size_item = QTableWidgetItem(f"{size_gb:.2f}")
             size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -364,10 +407,10 @@ class MainWindow(QMainWindow):
             # — Column 13 & 16: Validate & Uncompress Buttons
             if codec == "ffv1":
                 # 1. Check for original source file
-                orig_fp = find_original_file(fp, True)
+                source_fp = source_map.get(fp_key)
 
                 # — Column 13: Validate (Only if source exists)
-                if orig_fp is not None:
+                if source_fp is not None:
                     btnv = QPushButton("Validate")
                     btnv.clicked.connect(lambda _, p=fp: self.start_validate(p))
                     self.table.setCellWidget(r, 13, btnv)
@@ -391,7 +434,8 @@ class MainWindow(QMainWindow):
                 icon = self.style().standardIcon(QStyle.SP_DialogApplyButton if ok else QStyle.SP_DialogCancelButton)
                 label.setPixmap(icon.pixmap(24, 24))
             if codec == "rawvideo":
-                s = sample_tail_zeros(fp)
+                #s = sample_tail_zeros(fp)
+                s = tail_data.get(fp_key, {})
                 #print(fp.name, s)
                 if s["tail_zero"] >= 0.999 and s["near_tail_zero"] >= 0.999 and s["headish_zero"] <= 0.95:
                 # if size_physical / size_logical < 0.95:
@@ -403,27 +447,14 @@ class MainWindow(QMainWindow):
             # — Column 15: Relative Size
             pct_item = QTableWidgetItem()
             pct_str = ""
-            if fp.suffix.lower() == ".mkv":
-                # Check for source files in the *same directory*
-                avi_fp = fp.with_suffix(".avi")
-                tif_fp = fp.with_suffix(".tif")
-                tiff_fp = fp.with_suffix(".tiff")
-
-                source_fp = None
-                if avi_fp.exists():
-                    source_fp = avi_fp
-                elif tif_fp.exists():
-                    source_fp = tif_fp
-                elif tiff_fp.exists():
-                    source_fp = tiff_fp
-
-                if source_fp:
-                    source_size = source_fp.stat().st_size
+            if codec == "ffv1":
+                if source_fp is not None:
+                    source_key = str(source_fp)
+                    source_size = self.sizes[source_key]
                     pct = (size_logical / source_size * 100) if source_size else 0
                     pct_str = f"{pct:.0f}%"
 
                     # ---- NEW: Frame mismatch warning shading for Column 11 ----
-                    source_key = str(source_fp)
                     src_frames = self.frames.get(source_key)
 
                     # Only warn if we actually know the source frame count
@@ -455,9 +486,9 @@ class MainWindow(QMainWindow):
             self.table.setCellWidget(r, 17, btni)
 
             # Update progress based on files processed
-            file_progress_count += 1
-            if num_files_total > 0:
-                self.progress.setValue(int(100 * (file_progress_count / num_files_total)))
+            # file_progress_count += 1
+            # if num_files_total > 0:
+            #     self.progress.setValue(int(100 * (file_progress_count / num_files_total)))
 
         self.table.resizeColumnsToContents()
         # Ensure the spanned directory row also resizes
@@ -698,6 +729,39 @@ class MainWindow(QMainWindow):
             # This posts the call to the event loop instead of calling it directly, which prevents a "recursion"
             # error if many files are skipped in a row.
             QTimer.singleShot(0, self._run_next_batch)
+
+    @Slot(str)
+    def on_update_available(self, new_version):
+        """
+        Slot called only if the UpdateChecker finds a newer version.
+        """
+        logger.info(f"Update available: {new_version}")
+
+        # Construct a friendly message with a link
+        repo_url = "https://github.com/broemere/proper/releases/latest"
+        msg = (
+            f"A new version of {APP_NAME} is available!<br><br>"
+            f"Current version: <b>v{version}</b><br>"
+            f"New version: <b>{new_version}</b><br><br>"
+            f"Click <a href='{REPO_URL}'>here</a> to view the release page."
+        )
+
+        # Use your existing dialog function
+        self.show_info_dialog("Update Available", msg)
+
+    def show_info_dialog(self, title: str, message: str):
+        """Displays a modal informational dialog with a standard icon and rich text."""
+        #logger.info(f"Displaying info dialog: {title}")
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle(title)
+        msg_box.setTextFormat(Qt.RichText)  # Tell the box to parse HTML
+        msg_box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        msg_box.setText(f"<b>{title}</b>")
+        msg_box.setInformativeText(message)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec()
+
 
 
 if __name__ == '__main__':
