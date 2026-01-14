@@ -25,7 +25,7 @@ from widgets.dialogs import PixelDialog, PixelLoaderThread, instructions, Update
 from widgets.converter import FFmpegConverter
 from widgets.validator import FrameValidator
 from widgets.tracker import StorageTracker
-
+from widgets.formatting import format_duration
 
 logger = setup_logging()
 
@@ -56,11 +56,17 @@ class MainWindow(QMainWindow):
         last = self.settings.value("lastFolder", "")
         if last and os.path.isdir(last):
             self.path_edit.setText(last)
-            self.update_table(last)
+            self._pending_folder = last  # store it for later
+            #self.update_table(last)
 
         self.update_checker = UpdateChecker()
         self.update_checker.update_available.connect(self.on_update_available)
         self.update_checker.start()  # Runs in background, won't freeze app
+
+    def load_initial_folder(self):
+        if hasattr(self, "_pending_folder"):
+            self.update_table(self._pending_folder)
+            del self._pending_folder
 
     def closeEvent(self, event):
         """
@@ -222,6 +228,7 @@ class MainWindow(QMainWindow):
         files_only: list[Path] = [x for x in all_items_to_render if isinstance(x, Path)]
         tail_data = {}
         source_map = {}
+        stat_map = {}
 
         for i, fp in enumerate(files_only, 1):
             fp_key = str(fp)
@@ -239,7 +246,9 @@ class MainWindow(QMainWindow):
                 tail_data[fp_key] = sample_tail_zeros(fp)
 
             if codec == "ffv1":
-                source_map[fp_key] = find_original_file(fp, silence=True)
+                #source_map[fp_key] = find_original_file(fp, silence=True)
+                known = files_by_dir.get(fp.parent, [])
+                source_map[fp_key] = find_original_file(fp, silence=True, known_files=known)
             else:
                 source_map[fp_key] = None
 
@@ -247,7 +256,10 @@ class MainWindow(QMainWindow):
             frames = int(info.get("frames", 0) or 0)
             self.frames[fp_key] = frames
 
-            self.sizes[fp_key] = fp.stat().st_size
+            st = fp.stat()
+            stat_map[fp_key] = st
+
+            self.sizes[fp_key] = st.st_size
 
             # Progress: probing progress (not UI progress)
             if len(files_only) > 0:
@@ -257,244 +269,254 @@ class MainWindow(QMainWindow):
 
 
         # --- Populate Table ---
-        self.table.setRowCount(len(all_items_to_render))
-        QApplication.processEvents()
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        #self.table.setSortingEnabled(False)
+        try:
+            self.table.setRowCount(len(all_items_to_render))
+            QApplication.processEvents()
 
-        # Keep track of file progress (not row progress)
-        file_progress_count = 0
-        num_files_total = len(files)
+            # Keep track of file progress (not row progress)
+            file_progress_count = 0
+            num_files_total = len(files)
 
-        # Get style for folder icon
-        folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
-        # Define a background color for directory rows
-        dir_bg_color = QColor("#eeeeee")
-        warning_color = QColor("#f54927")
-        pal = self.table.palette()
-        if pal.color(QPalette.Base).lightness() < 128:  # Dark theme
-            dir_bg_color = QColor("#424242")
-        for r, item in enumerate(all_items_to_render):
-            # --- Handle Directory Header Rows ---
-            if isinstance(item, str):
-                dir_path_str = item
+            # Get style for folder icon
+            folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+            # Define a background color for directory rows
+            dir_bg_color = QColor("#eeeeee")
+            warning_color = QColor("#f54927")
+            pal = self.table.palette()
+            if pal.color(QPalette.Base).lightness() < 128:  # Dark theme
+                dir_bg_color = QColor("#424242")
+            for r, item in enumerate(all_items_to_render):
+                # --- Handle Directory Header Rows ---
+                if isinstance(item, str):
+                    dir_path_str = item
 
-                # Column 0: Color swatch (empty)
+                    # Column 0: Color swatch (empty)
+                    color_item = QTableWidgetItem()
+                    color_item.setBackground(dir_bg_color)
+                    color_item.setFlags(Qt.ItemIsEnabled)  # Not selectable
+                    self.table.setItem(r, 0, color_item)
+
+                    # Column 1: Directory Name
+                    dir_item = QTableWidgetItem(f" {dir_path_str}{os.sep}")  # Add trailing slash
+                    dir_item.setIcon(folder_icon)
+                    dir_item.setBackground(dir_bg_color)
+                    dir_item.setFlags(Qt.ItemIsEnabled)
+                    dir_item.setForeground(pal.color(QPalette.Text))
+                    self.table.setItem(r, 1, dir_item)
+
+                    # Span the directory name across remaining columns
+                    self.table.setSpan(r, 1, 1, self.table.columnCount() - 1)
+                    continue  # Skip to next row
+
+                # --- Handle File Rows (item is a Path object) ---
+                fp = item
+
+                # Use full path string as key to prevent name collisions
+                fp_key = str(fp)
+
+                # Get relative path for display in filename column
+                display_name = fp.name  # Fallback
+
+                #info = get_video_info(fp)
+                info = info_map.get(fp_key, {})
+                codec = info.get("codec_name", "-")
+                if codec == "Unknown":
+                    codec = "-"
+                #self.codecs[fp_key] = codec  # Cache global
+
+                # — Column 0: Color swatch
                 color_item = QTableWidgetItem()
-                color_item.setBackground(dir_bg_color)
-                color_item.setFlags(Qt.ItemIsEnabled)  # Not selectable
+                hexcol = EXT_COLOR.get(fp.suffix.lower())
+                if hexcol:
+                    color_item.setBackground(QBrush(QColor(hexcol)))
                 self.table.setItem(r, 0, color_item)
 
-                # Column 1: Directory Name
-                dir_item = QTableWidgetItem(f" {dir_path_str}{os.sep}")  # Add trailing slash
-                dir_item.setIcon(folder_icon)
-                dir_item.setBackground(dir_bg_color)
-                dir_item.setFlags(Qt.ItemIsEnabled)
-                dir_item.setForeground(pal.color(QPalette.Text))
-                self.table.setItem(r, 1, dir_item)
+                # — Column 1: Filename (now relative path)
+                display_item = QTableWidgetItem(display_name)
+                display_item.setData(Qt.UserRole, fp_key) # <-- ADD THIS LINE
+                self.table.setItem(r, 1, display_item)
 
-                # Span the directory name across remaining columns
-                self.table.setSpan(r, 1, 1, self.table.columnCount() - 1)
-                continue  # Skip to next row
+                # — Column 2: Size
+                size_logical = self.sizes[fp_key]
+                size_gb = size_logical / 1024 ** 3
+                size_item = QTableWidgetItem(f"{size_gb:.2f}")
+                size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(r, 2, size_item)
 
-            # --- Handle File Rows (item is a Path object) ---
-            fp = item
+                # — Column 3: Created
+                created = datetime.datetime.fromtimestamp(stat_map[fp_key].st_ctime)
+                self.table.setItem(r, 3, QTableWidgetItem(created.strftime("%Y-%m-%d %H:%M:%S")))
 
-            # Use full path string as key to prevent name collisions
-            fp_key = str(fp)
+                # — Column 4: Duration
+                dur = float(info.get("duration", "0"))
+                # *** Use fp_key for dictionary ***
+                frames = int(info.get("frames", 0))  # Capture frames locally
+                #self.frames[fp_key] = frames  # Cache global
+                #print(fp_key, info.get("frames", 0), print(dur))
+                dur_str = format_duration(dur)
+                self.table.setItem(r, 4, QTableWidgetItem(dur_str))
 
-            # Get relative path for display in filename column
-            display_name = fp.name  # Fallback
+                # — Column 5-10: Video Info
+                self.table.setItem(r, 5, QTableWidgetItem(codec))
+                pix = info.get("pix_fmt", "-")
+                if pix == "Unknown":
+                    pix = "-"
+                self.table.setItem(r, 6, QTableWidgetItem(pix))
+                w = info.get("width", "0")
+                h = info.get("height", "0")
+                res = f"{w}x{h}" if w and h else "N/A"
+                self.table.setItem(r, 7, QTableWidgetItem(res))
+                tag = info.get("codec_tag_string", "")
+                if tag == "Unknown":
+                    tag = "-"
+                if not re.match(r"^[A-Za-z0-9_.]+$", tag): tag = "-"
+                self.table.setItem(r, 8, QTableWidgetItem(tag))
+                color = "-"
+                if "gray" in pix.lower():
+                    color = "Gray"
+                elif "rgb" in pix.lower():
+                    color = "RGB"
+                elif "bgr" in pix.lower():
+                    color = "BGR"
+                elif "yuv" in pix.lower():
+                    color = "YUV"
+                self.table.setItem(r, 9, QTableWidgetItem(color))
+                fps = str(int(round(float(info.get("fps", "0")))))
+                self.table.setItem(r, 10, QTableWidgetItem(fps))
 
-            #info = get_video_info(fp)
-            info = info_map.get(fp_key, {})
-            codec = info.get("codec_name", "-")
-            if codec == "Unknown":
-                codec = "-"
-            self.codecs[fp_key] = codec  # Cache global
-
-            # — Column 0: Color swatch
-            color_item = QTableWidgetItem()
-            hexcol = EXT_COLOR.get(fp.suffix.lower())
-            if hexcol:
-                color_item.setBackground(QBrush(QColor(hexcol)))
-            self.table.setItem(r, 0, color_item)
-
-            # — Column 1: Filename (now relative path)
-            display_item = QTableWidgetItem(display_name)
-            display_item.setData(Qt.UserRole, fp_key) # <-- ADD THIS LINE
-            self.table.setItem(r, 1, display_item)
-
-            # — Column 2: Size
-            size_logical = self.sizes[fp_key]
-            size_gb = size_logical / 1024 ** 3
-            size_item = QTableWidgetItem(f"{size_gb:.2f}")
-            size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(r, 2, size_item)
-
-            # — Column 3: Created
-            created = datetime.datetime.fromtimestamp(fp.stat().st_ctime)
-            self.table.setItem(r, 3, QTableWidgetItem(created.strftime("%Y-%m-%d %H:%M:%S")))
-
-            # — Column 4: Duration
-            dur = float(info.get("duration", "0"))
-            # *** Use fp_key for dictionary ***
-            frames = int(info.get("frames", 0))  # Capture frames locally
-            self.frames[fp_key] = frames  # Cache global
-            #print(fp_key, info.get("frames", 0), print(dur))
-            dur_str = str(datetime.timedelta(seconds=int(dur))) if dur else "-"
-            self.table.setItem(r, 4, QTableWidgetItem(dur_str))
-
-            # — Column 5-10: Video Info
-            self.table.setItem(r, 5, QTableWidgetItem(codec))
-            pix = info.get("pix_fmt", "-")
-            if pix == "Unknown":
-                pix = "-"
-            self.table.setItem(r, 6, QTableWidgetItem(pix))
-            w = info.get("width", "0")
-            h = info.get("height", "0")
-            res = f"{w}x{h}" if w and h else "N/A"
-            self.table.setItem(r, 7, QTableWidgetItem(res))
-            tag = info.get("codec_tag_string", "")
-            if tag == "Unknown":
-                tag = "-"
-            if not re.match(r"^[A-Za-z0-9_.]+$", tag): tag = "-"
-            self.table.setItem(r, 8, QTableWidgetItem(tag))
-            color = "-"
-            if "gray" in pix.lower():
-                color = "Gray"
-            elif "rgb" in pix.lower():
-                color = "RGB"
-            elif "bgr" in pix.lower():
-                color = "BGR"
-            elif "yuv" in pix.lower():
-                color = "YUV"
-            self.table.setItem(r, 9, QTableWidgetItem(color))
-            fps = str(int(round(float(info.get("fps", "0")))))
-            self.table.setItem(r, 10, QTableWidgetItem(fps))
-
-            # — Column 11: Frames (NEW COLUMN)
-            frames_item = QTableWidgetItem(str(frames))
-            #frames_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(r, 11, frames_item)
+                # — Column 11: Frames (NEW COLUMN)
+                frames_item = QTableWidgetItem(str(frames))
+                #frames_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(r, 11, frames_item)
 
 
-            # — Column 12: Compress Button
-            if codec != "ffv1":
-                # Determine widget based on status
-                widget = None
+                # — Column 12: Compress Button
+                if codec != "ffv1":
+                    # Determine widget based on status
+                    widget = None
 
-                # Check for corruption first (Frames=0 or Duration/Res=0)
-                is_corrupt = (frames == 0) or (dur == 0 and float(w) == 0 and float(h) == 0)
+                    # Check for corruption first (Frames=0 or Duration/Res=0)
+                    is_corrupt = (frames == 0) or (dur == 0 and float(w) == 0 and float(h) == 0)
 
-                if is_corrupt:
-                    widget = QLabel("Corrupt")
-                    widget.setStyleSheet("color: red; font-weight: bold;")
-                    widget.setAlignment(Qt.AlignCenter)
-                elif codec == "mjpeg":
-                    widget = QLabel("Compressed")
-                    widget.setAlignment(Qt.AlignCenter)
-                    widget.setStyleSheet("color: #777; font-style: italic;")  # Optional styling
-                elif frames == 1:
-                    widget = QLabel("Single Frame")
-                    widget.setAlignment(Qt.AlignCenter)
-                    widget.setStyleSheet("color: #777; font-style: italic;")  # Optional styling
-                else:
-                    # Normal Compress Button
-                    widget = QPushButton("Compress")
-                    widget.clicked.connect(lambda _, p=fp: self.start_convert(p, "compress"))
+                    if is_corrupt:
+                        widget = QLabel("Corrupt")
+                        widget.setStyleSheet("color: red; font-weight: bold;")
+                        widget.setAlignment(Qt.AlignCenter)
+                    elif codec == "mjpeg":
+                        widget = QLabel("Compressed")
+                        widget.setAlignment(Qt.AlignCenter)
+                        widget.setStyleSheet("color: #777; font-style: italic;")  # Optional styling
+                    elif frames == 1:
+                        widget = QLabel("Single Frame")
+                        widget.setAlignment(Qt.AlignCenter)
+                        widget.setStyleSheet("color: #777; font-style: italic;")  # Optional styling
+                    else:
+                        # Normal Compress Button
+                        widget = QPushButton("Compress")
+                        widget.clicked.connect(lambda _, p=fp: self.start_convert(p, "compress"))
 
-                self.table.setCellWidget(r, 12, widget)
+                    self.table.setCellWidget(r, 12, widget)
 
-            # — Column 13 & 16: Validate & Uncompress Buttons
-            if codec == "ffv1":
-                # 1. Check for original source file
-                source_fp = source_map.get(fp_key)
+                # — Column 13 & 16: Validate & Uncompress Buttons
+                if codec == "ffv1":
+                    # 1. Check for original source file
+                    source_fp = source_map.get(fp_key)
 
-                # — Column 13: Validate (Only if source exists)
-                if source_fp is not None:
-                    btnv = QPushButton("Validate")
-                    btnv.clicked.connect(lambda _, p=fp: self.start_validate(p))
-                    self.table.setCellWidget(r, 13, btnv)
-                else:
-                    lbl = QLabel("Source not found")
-                    lbl.setAlignment(Qt.AlignCenter)
-                    lbl.setStyleSheet("color: #777; font-style: italic;")
-                    self.table.setCellWidget(r, 13, lbl)
+                    # — Column 13: Validate (Only if source exists)
+                    if source_fp is not None:
+                        btnv = QPushButton("Validate")
+                        btnv.clicked.connect(lambda _, p=fp: self.start_validate(p))
+                        self.table.setCellWidget(r, 13, btnv)
+                    else:
+                        lbl = QLabel("Source not found")
+                        lbl.setAlignment(Qt.AlignCenter)
+                        lbl.setStyleSheet("color: #777; font-style: italic;")
+                        self.table.setCellWidget(r, 13, lbl)
 
-                # — Column 16: Uncompress (Always available for FFV1)
-                btnd = QPushButton("Uncompress")
-                btnd.clicked.connect(lambda _, p=fp: self.start_convert(p, "uncompress"))
-                self.table.setCellWidget(r, 16, btnd)
+                    # — Column 16: Uncompress (Always available for FFV1)
+                    btnd = QPushButton("Uncompress")
+                    btnd.clicked.connect(lambda _, p=fp: self.start_convert(p, "uncompress"))
+                    self.table.setCellWidget(r, 16, btnd)
 
-            # — Column 14: Lossless Icon
-            label = QLabel()
-            label.setAlignment(Qt.AlignCenter)
-            # *** Use fp_key for dictionary ***
-            if fp_key in self.lossless_results:
-                ok = self.lossless_results[fp_key]
-                icon = self.style().standardIcon(QStyle.SP_DialogApplyButton if ok else QStyle.SP_DialogCancelButton)
-                label.setPixmap(icon.pixmap(24, 24))
-            if codec == "rawvideo":
-                #s = sample_tail_zeros(fp)
-                s = tail_data.get(fp_key, {})
-                #print(fp.name, s)
-                if s["tail_zero"] >= 0.999 and s["near_tail_zero"] >= 0.999 and s["headish_zero"] <= 0.95:
-                # if size_physical / size_logical < 0.95:
-                    icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+                # — Column 14: Lossless Icon
+                label = QLabel()
+                label.setAlignment(Qt.AlignCenter)
+                # *** Use fp_key for dictionary ***
+                if fp_key in self.lossless_results:
+                    ok = self.lossless_results[fp_key]
+                    icon = self.style().standardIcon(QStyle.SP_DialogApplyButton if ok else QStyle.SP_DialogCancelButton)
                     label.setPixmap(icon.pixmap(24, 24))
-                    label.setToolTip("File is missing data/incomplete. Compressing will process all viable data.")
-            self.table.setCellWidget(r, 14, label)
+                if codec == "rawvideo":
+                    #s = sample_tail_zeros(fp)
+                    s = tail_data.get(fp_key)
+                    #print(fp.name, s)
+                    if s["tail_zero"] >= 0.999 and s["near_tail_zero"] >= 0.999 and s["headish_zero"] <= 0.95:
+                    # if size_physical / size_logical < 0.95:
+                        icon = self.style().standardIcon(QStyle.SP_MessageBoxWarning)
+                        label.setPixmap(icon.pixmap(24, 24))
+                        label.setToolTip("File is missing data/incomplete. Compressing will process all viable data.")
+                self.table.setCellWidget(r, 14, label)
 
-            # — Column 15: Relative Size
-            pct_item = QTableWidgetItem()
-            pct_str = ""
-            if codec == "ffv1":
-                if source_fp is not None:
-                    source_key = str(source_fp)
-                    source_size = self.sizes[source_key]
-                    pct = (size_logical / source_size * 100) if source_size else 0
-                    pct_str = f"{pct:.0f}%"
+                # — Column 15: Relative Size
+                pct_item = QTableWidgetItem()
+                pct_str = ""
+                if codec == "ffv1":
+                    if source_fp is not None:
+                        source_key = str(source_fp)
+                        source_size = self.sizes[source_key]
+                        pct = (size_logical / source_size * 100) if source_size else 0
+                        pct_str = f"{pct:.0f}%"
 
-                    # ---- NEW: Frame mismatch warning shading for Column 11 ----
-                    src_frames = self.frames.get(source_key)
+                        # ---- NEW: Frame mismatch warning shading for Column 11 ----
+                        src_frames = self.frames.get(source_key)
 
-                    # Only warn if we actually know the source frame count
-                    if isinstance(src_frames, int) and src_frames > 0:
-                        if frames != src_frames:
-                            frames_item.setBackground(QBrush(warning_color))
-                            frames_item.setToolTip(
-                                f"Frame mismatch vs source:\n"
-                                f"Source: {source_fp.name} = {src_frames}\n"
-                                f"Output: {fp.name} = {frames}"
-                            )
-                else:
-                    pct_str = "N/A"
+                        # Only warn if we actually know the source frame count
+                        if isinstance(src_frames, int) and src_frames > 0:
+                            if frames != src_frames:
+                                frames_item.setBackground(QBrush(warning_color))
+                                frames_item.setToolTip(
+                                    f"Frame mismatch vs source:\n"
+                                    f"Source: {source_fp.name} = {src_frames}\n"
+                                    f"Output: {fp.name} = {frames}"
+                                )
+                    else:
+                        pct_str = "N/A"
 
-            pct_item.setText(pct_str)
-            pct_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(r, 15, pct_item)
+                pct_item.setText(pct_str)
+                pct_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(r, 15, pct_item)
 
-            # — Column 17: Inspect Button
-            btni = QPushButton()
-            btni.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
-            btni.setProperty("fp", fp)
-            btni.setProperty("width", w)
-            btni.setProperty("height", h)
-            btni.setProperty("pix_fmt", pix)
-            btni.clicked.connect(self.inspect_pixels)
-            btni.setStyleSheet(
-                "QPushButton { padding-top: 2px; padding-bottom: 2px; padding-left: 4px; padding-right: 4px; }")
-            self.table.setCellWidget(r, 17, btni)
+                # — Column 17: Inspect Button
+                btni = QPushButton()
+                btni.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+                btni.setProperty("fp", fp)
+                btni.setProperty("width", w)
+                btni.setProperty("height", h)
+                btni.setProperty("pix_fmt", pix)
+                btni.clicked.connect(self.inspect_pixels)
+                btni.setStyleSheet(
+                    "QPushButton { padding-top: 2px; padding-bottom: 2px; padding-left: 4px; padding-right: 4px; }")
+                self.table.setCellWidget(r, 17, btni)
 
-            # Update progress based on files processed
-            # file_progress_count += 1
-            # if num_files_total > 0:
-            #     self.progress.setValue(int(100 * (file_progress_count / num_files_total)))
+                # Update progress based on files processed
+                # file_progress_count += 1
+                # if num_files_total > 0:
+                #     self.progress.setValue(int(100 * (file_progress_count / num_files_total)))
 
-        self.table.resizeColumnsToContents()
-        # Ensure the spanned directory row also resizes
-        for r in range(self.table.rowCount()):
-            if self.table.columnSpan(r, 1) > 1:
-                self.table.setRowHeight(r, self.table.rowHeight(r))  # Trigger redraw/resize
+            self.table.resizeColumnsToContents()
+            # # Ensure the spanned directory row also resizes
+            # for r in range(self.table.rowCount()):
+            #     if self.table.columnSpan(r, 1) > 1:
+            #         self.table.setRowHeight(r, self.table.rowHeight(r))  # Trigger redraw/resize
+
+        finally:
+            #self.table.setSortingEnabled(True)
+            self.table.blockSignals(False)
+            self.table.setUpdatesEnabled(True)
+            self.table.viewport().update()
 
         self.status.setText("Ready")
         self.progress.setValue(0)
@@ -736,17 +758,12 @@ class MainWindow(QMainWindow):
         Slot called only if the UpdateChecker finds a newer version.
         """
         logger.info(f"Update available: {new_version}")
-
-        # Construct a friendly message with a link
-        repo_url = "https://github.com/broemere/proper/releases/latest"
         msg = (
             f"A new version of {APP_NAME} is available!<br><br>"
             f"Current version: <b>v{version}</b><br>"
             f"New version: <b>{new_version}</b><br><br>"
             f"Click <a href='{REPO_URL}'>here</a> to view the release page."
         )
-
-        # Use your existing dialog function
         self.show_info_dialog("Update Available", msg)
 
     def show_info_dialog(self, title: str, message: str):
@@ -755,12 +772,14 @@ class MainWindow(QMainWindow):
         msg_box = QMessageBox(self)
         msg_box.setIcon(QMessageBox.Information)
         msg_box.setWindowTitle(title)
-        msg_box.setTextFormat(Qt.RichText)  # Tell the box to parse HTML
+        msg_box.setTextFormat(Qt.RichText)  # parse HTML
         msg_box.setTextInteractionFlags(Qt.TextBrowserInteraction)
         msg_box.setText(f"<b>{title}</b>")
         msg_box.setInformativeText(message)
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec()
+
+
 
 
 
@@ -780,5 +799,7 @@ if __name__ == '__main__':
     win = MainWindow()
     win.show()
     splash.finish(win)    # Close splash when ready
+
+    QTimer.singleShot(0, win.load_initial_folder)
 
     sys.exit(app.exec())

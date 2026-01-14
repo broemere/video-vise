@@ -29,3 +29,20 @@ def format_decimal(value: float | None, max_decimals: int = 2) -> str:
     # strip trailing zeros and then a trailing dot if present
     s = s.rstrip("0").rstrip(".")
     return s
+
+def format_duration(seconds: float | int) -> str:
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "-"
+
+    if s <= 0:
+        return "-"
+
+    m, sec = divmod(s, 60)
+    h, m = divmod(m, 60)
+
+    if h > 0:
+        return f"{h:d}:{m:02d}:{sec:02d}"
+    else:
+        return f"{m:02d}:{sec:02d}"

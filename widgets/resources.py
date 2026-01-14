@@ -69,6 +69,6 @@ def setup_logging():
         handlers = [file_handler, logging.StreamHandler(sys.stderr)]  # Also log to stderr in dev
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(threadName)s] %(levelname)s: %(message)s", handlers=handlers)
     logger = logging.getLogger(__name__)
-    logger.info(f"Logging to {LOGFILE}")
+    #logger.info(f"Logging to {LOGFILE}")
     logger.info(f"ffmpeg: {FFMPEG}")
     return logger

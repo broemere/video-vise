@@ -6,6 +6,7 @@ import psutil
 import json
 import subprocess
 import os
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +87,54 @@ def find_file_on_network_drives(relative_path: str):
             continue
     return found_paths
 
-def find_original_file(base_fp: Path, silence=False, exts = ('avi', 'tif', 'tiff')):
+
+def find_original_file(
+    base_fp: Path,
+    silence: bool = False,
+    exts: tuple[str, ...] = ("avi", "tif", "tiff"),
+    known_files: Iterable[Path] | None = None,
+) -> Path | None:
     """
-    Given a base filepath (e.g. /some/dir/video.mkv), look for
-    /some/dir/video.<ext> in order, returning the first one that exists.
-    If none exist, returns None.
+    Find the original/source file for base_fp by matching same directory + same stem
+    and trying extensions in `exts` order.
+
+    If `known_files` is provided, search is done in-memory (no disk hits).
+    Otherwise falls back to filesystem existence checks.
     """
-    # strip any suffix, so video.mkv → video
-    stem = base_fp.with_suffix("")
+    base_fp = Path(base_fp)
+    parent = base_fp.parent
+    stem_cf = base_fp.stem.casefold()
+
+    # Fast path: use in-memory file list
+    if known_files is not None:
+        # Build a tiny lookup for just this stem in just this dir
+        # ext -> Path (ext is "avi"/"tif"/"tiff" lowercased)
+        matches: dict[str, Path] = {}
+
+        for fp in known_files:
+            # If caller passes all files in the folder tree, this keeps it correct
+            # and avoids false matches from other directories.
+            if fp.parent != parent:
+                continue
+            if fp.stem.casefold() != stem_cf:
+                continue
+
+            ext = fp.suffix[1:].casefold() if fp.suffix.startswith(".") else fp.suffix.casefold()
+            if ext:  # ignore files with no extension
+                matches[ext] = fp
+
+        for ext in exts:
+            hit = matches.get(ext.casefold())
+            if hit is not None:
+                if not silence:
+                    logger.info(f"Found original file {hit}")
+                return hit
+        return None
+
+    # Fallback: disk checks (standalone usage)
+    stem_path = base_fp.with_suffix("")  # video.mkv -> video
     for ext in exts:
-        candidate = stem.with_suffix(f".{ext}")
+        candidate = stem_path.with_suffix("." + ext)
         if candidate.exists():
             if not silence:
                 logger.info(f"Found original file {candidate}")
