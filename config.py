@@ -1,5 +1,5 @@
 APP_NAME = "VideoVise"
-version = "1.4"
+version = "1.6"
 ORG = "TykockiLab"
 EXT_COLOR = {
     ".tif": "#4e84af",  # FIJI/ImageJ color

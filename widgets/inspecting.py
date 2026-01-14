@@ -307,7 +307,10 @@ def inspect_ffprobe(fp: Path) -> dict[str, any]:
     # Run command (Fast, header read only)
     args = [
         FFPROBE, "-v", "error",
-        "-show_format", "-show_streams",
+        "-select_streams", "v:0",
+        #"-show_format", "-show_streams",
+        "-show_entries",
+        "format=duration:stream=codec_name,pix_fmt,width,height,codec_tag_string,avg_frame_rate,r_frame_rate,nb_frames,duration",
         "-of", "json",
         str(fp)
     ]
@@ -323,8 +326,8 @@ def inspect_ffprobe(fp: Path) -> dict[str, any]:
         return {"duration": 0, "frames": 0, "fps": 0.0, "width": 0, "height": 0}
 
     fmt = data.get("format", {})
-    # Get first video stream safely
-    vs = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+    streams = data.get("streams", []) or []
+    vs = streams[0] if streams else {}
 
     # --- HELPER: Safely parse numbers from "N/A", "100", or None ---
     def safe_float(val):
