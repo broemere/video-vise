@@ -27,6 +27,8 @@ from widgets.file_scanning import find_file_on_network_drives, find_original_fil
 from widgets.resources import setup_logging, icon_path, FFMPEG, FFPROBE
 from widgets.inspecting import get_video_info
 from config import *
+import certifi
+import ssl
 
 
 log = logging.getLogger(__name__)
@@ -172,7 +174,10 @@ class UpdateChecker(QThread):
         try:
             # We use urllib to avoid adding an external dependency like 'requests'
             # The timeout ensures we don't hang indefinitely if the internet is flaky
-            with urllib.request.urlopen(REPO_URL, timeout=5) as response:
+
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+            with urllib.request.urlopen(REPO_URL, context=ssl_context, timeout=5) as response:
                 # GitHub redirects 'latest' to the specific tag URL.
                 # Example: .../releases/tag/v0.1
                 final_url = response.geturl()
