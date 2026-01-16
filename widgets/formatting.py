@@ -45,4 +45,4 @@ def format_duration(seconds: float | int) -> str:
     if h > 0:
         return f"{h:d}:{m:02d}:{sec:02d}"
     else:
-        return f"{m:02d}:{sec:02d}"
+        return f"{m:d}:{sec:02d}"

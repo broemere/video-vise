@@ -9,7 +9,7 @@ import gc
 from random import sample
 
 # Third-Party Imports
-from PySide6.QtCore import QSettings, Qt, QTimer, Slot
+from PySide6.QtCore import QSettings, Qt, QTimer, Slot, QDir
 from PySide6.QtGui import QBrush, QColor, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout,
@@ -48,6 +48,7 @@ class MainWindow(QMainWindow):
         self.num_compress = 0
         self.tracker = StorageTracker()
         self.init_ui()
+        self.disabled_text = self.table.palette().color(QPalette.Disabled, QPalette.Text)
         geometry = self.settings.value("windowGeometry")
         if geometry:
             self.restoreGeometry(geometry)  # Restore size AND position
@@ -100,6 +101,7 @@ class MainWindow(QMainWindow):
         else:
             alt = base.darker(110)  # Light background: darken alternate rows
         pal.setColor(QPalette.AlternateBase, alt)
+
         self.table.setPalette(pal)
         cols = [
             " ", "Filename","Size (GB)","Created","Duration","Codec","PixelFmt",
@@ -156,11 +158,8 @@ class MainWindow(QMainWindow):
     def browse_folder(self):
         last = self.settings.value("lastFolder", type=str)
         if last:
-            parent = Path(last).parent  # Always try to use the parent of the last folder
-            if parent.exists() and parent.is_dir():
-                initial_dir = str(parent)
-            else:
-                initial_dir = str(Path.home())
+            parent = Path(last).parent
+            initial_dir = str(parent) if parent.exists() else str(Path.home())
         else:
             initial_dir = str(Path.home())
 
@@ -172,10 +171,11 @@ class MainWindow(QMainWindow):
         )
 
         if folder:
-            self.path_edit.setText(folder)
-            self.settings.setValue("lastFolder", folder)
+            native = QDir.toNativeSeparators(folder)
+            self.path_edit.setText(native)
+            self.settings.setValue("lastFolder", native)
             self.lossless_results.clear()
-            self.update_table(folder)
+            self.update_table(native)
 
     def update_progress(self, val: int):
         self.progress.setValue(val)
@@ -300,7 +300,11 @@ class MainWindow(QMainWindow):
                     self.table.setItem(r, 0, color_item)
 
                     # Column 1: Directory Name
-                    dir_item = QTableWidgetItem(f" {dir_path_str}{os.sep}")  # Add trailing slash
+                    dir_display = QDir.toNativeSeparators(dir_path_str)
+                    sep = QDir.separator()  # returns "\" on Windows, "/" on macOS/Linux
+                    if not dir_display.endswith(sep):
+                        dir_display += sep
+                    dir_item = QTableWidgetItem(f" {dir_display}")
                     dir_item.setIcon(folder_icon)
                     dir_item.setBackground(dir_bg_color)
                     dir_item.setFlags(Qt.ItemIsEnabled)
@@ -357,7 +361,9 @@ class MainWindow(QMainWindow):
                 #self.frames[fp_key] = frames  # Cache global
                 #print(fp_key, info.get("frames", 0), print(dur))
                 dur_str = format_duration(dur)
-                self.table.setItem(r, 4, QTableWidgetItem(dur_str))
+                dur_item = QTableWidgetItem(dur_str)
+                dur_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(r, 4, dur_item)
 
                 # — Column 5-10: Video Info
                 self.table.setItem(r, 5, QTableWidgetItem(codec))
@@ -408,17 +414,20 @@ class MainWindow(QMainWindow):
                     elif codec == "mjpeg":
                         widget = QLabel("Compressed")
                         widget.setAlignment(Qt.AlignCenter)
-                        widget.setStyleSheet("color: #777; font-style: italic;")  # Optional styling
+                        widget.setStyleSheet(f"color: {self.disabled_text.name()}; font-style: italic;")  # Optional styling
                     elif frames == 1:
                         widget = QLabel("Single Frame")
                         widget.setAlignment(Qt.AlignCenter)
-                        widget.setStyleSheet("color: #777; font-style: italic;")  # Optional styling
+                        widget.setStyleSheet(f"color: {self.disabled_text.name()}; font-style: italic;")
                     else:
                         # Normal Compress Button
                         widget = QPushButton("Compress")
                         widget.clicked.connect(lambda _, p=fp: self.start_convert(p, "compress"))
 
                     self.table.setCellWidget(r, 12, widget)
+
+                    if frames == 1:
+                        self._fade_row(r, tooltip="Single-frame file (compression not applicable).")
 
                 # — Column 13 & 16: Validate & Uncompress Buttons
                 if codec == "ffv1":
@@ -778,6 +787,38 @@ class MainWindow(QMainWindow):
         msg_box.setInformativeText(message)
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec()
+
+    def _fade_row(self, row: int, *, tooltip: str | None = None) -> None:
+        table = self.table
+        pal = table.palette()
+
+        disabled_fg = pal.color(QPalette.Disabled, QPalette.Text)
+        # Optional: a subtle disabled background tint (very light touch)
+        # If you prefer *no* background change, set this to None.
+        disabled_bg = pal.color(QPalette.Disabled, QPalette.Base)
+
+        # 1) Items: set foreground (and optionally background)
+        for c in range(table.columnCount()):
+            item = table.item(row, c)
+            if item is not None:
+                item.setForeground(disabled_fg)
+                # Optional background tint:
+                # item.setBackground(disabled_bg)
+                if tooltip:
+                    item.setToolTip(tooltip)
+
+        # 2) Cell widgets: labels/buttons/etc
+        for c in range(table.columnCount()):
+            w = table.cellWidget(row, c)
+            if w is not None:
+                # “Disable look” without disabling interaction globally:
+                w.setEnabled(False)  # gives built-in disabled styling for most widgets
+                # For QLabel (since disabling doesn’t always change color),
+                # force stylesheet color too.
+                if isinstance(w, QLabel):
+                    w.setStyleSheet(f"color: {disabled_fg.name()};")
+                if tooltip:
+                    w.setToolTip(tooltip)
 
 
 
