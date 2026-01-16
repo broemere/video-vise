@@ -825,6 +825,7 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
+    os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(icon_path))
     app.setStyle('Fusion')
