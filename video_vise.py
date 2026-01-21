@@ -104,7 +104,7 @@ class MainWindow(QMainWindow):
 
         self.table.setPalette(pal)
         cols = [
-            " ", "Filename","Size (GB)","Created","Duration","Codec","PixelFmt",
+            " ", "Filename","Size (GB)","Modified","Duration","Codec","PixelFmt",
             "Resolution","Tag","Color/Gray","FPS","Frames","Compress","Validate","Lossless", "Relative Size", "Uncompress", "Inspect"
         ]
         self.table.setColumnCount(len(cols)); self.table.setHorizontalHeaderLabels(cols)
@@ -245,13 +245,14 @@ class MainWindow(QMainWindow):
             if codec == "rawvideo":
                 tail_data[fp_key] = sample_tail_zeros(fp)
 
-            if codec == "ffv1":
+            if codec == "ffv1" or codec == "tiff":
                 #source_map[fp_key] = find_original_file(fp, silence=True)
                 known = files_by_dir.get(fp.parent, [])
+                if not known:
+                    known = files_only
                 source_map[fp_key] = find_original_file(fp, silence=True, known_files=known)
             else:
                 source_map[fp_key] = None
-
 
             frames = int(info.get("frames", 0) or 0)
             self.frames[fp_key] = frames
@@ -350,8 +351,8 @@ class MainWindow(QMainWindow):
                 size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(r, 2, size_item)
 
-                # — Column 3: Created
-                created = datetime.datetime.fromtimestamp(stat_map[fp_key].st_ctime)
+                # — Column 3: Modified
+                created = datetime.datetime.fromtimestamp(stat_map[fp_key].st_mtime)
                 self.table.setItem(r, 3, QTableWidgetItem(created.strftime("%Y-%m-%d %H:%M:%S")))
 
                 # — Column 4: Duration
@@ -825,7 +826,7 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
-    os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"
+    os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"  # Suppress weird font warning on built exe (Windows only)
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(icon_path))
     app.setStyle('Fusion')

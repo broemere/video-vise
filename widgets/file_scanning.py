@@ -132,9 +132,9 @@ def find_original_file(
         return None
 
     # Fallback: disk checks (standalone usage)
-    stem_path = base_fp.with_suffix("")  # video.mkv -> video
+    base_name = base_fp.stem  # keeps dots that are not the final suffix
     for ext in exts:
-        candidate = stem_path.with_suffix("." + ext)
+        candidate = parent / f"{base_name}.{ext}"
         if candidate.exists():
             if not silence:
                 logger.info(f"Found original file {candidate}")

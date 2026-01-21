@@ -42,6 +42,9 @@ class FFmpegConverter(QThread):
             else:
                 self._process_video(frame_re, threads, slices)
 
+            stat = self.input_path.stat()
+            os.utime(self.output_path, (stat.st_atime, stat.st_mtime))
+
             # finish up
             self.progress.emit(100)
             if self.track:
