@@ -3,6 +3,7 @@ import logging
 from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
 import re
 import os
+import sys
 import numpy as np
 import subprocess
 from tifffile import TiffFile
@@ -165,7 +166,7 @@ class FrameValidator(QThread):
         try:
             with TiffFile(path) as tif:
                 # 1. Use Shared Inspector Logic
-                _, access_strategy, total_frames, series_shape, _ = get_tiff_summary(tif)
+                _, access_strategy, total_frames, series_shape, series_dtype = get_tiff_summary(tif)
 
                 if total_frames == 0: return []
                 count_to_check = min(total_frames, self.PREFIX)
@@ -195,9 +196,19 @@ class FrameValidator(QThread):
                     else:
                         h, w = shape_check[-2:]
 
+                # --- DYNAMIC FORMAT CHECK ---
+                # We use the actual dtype of the file to tell FFmpeg what to expect on stdin
+                input_pix_fmt = "gray8"
+                if series_dtype == np.uint16 or series_dtype == '>u2' or series_dtype == '<u2':
+                    input_pix_fmt = "gray16le"
+                elif series_dtype == np.uint8:
+                    input_pix_fmt = "gray8"
+                # Add more types here if you ever process RGB TIFs
+
                 cmd = [
                     FFMPEG, "-f", "rawvideo",
-                    "-pix_fmt", self.target_pix_fmt,
+                    "-pix_fmt", input_pix_fmt,
+                    #"-pix_fmt", self.target_pix_fmt,
                     "-s", f"{w}x{h}",
                     "-i", "pipe:0",
                     "-vf", f"format={self.target_pix_fmt}",
@@ -228,7 +239,8 @@ class FrameValidator(QThread):
 
                         # B. Restore Shape Safety Checks (FROM ORIGINAL)
                         # Ensure we don't pipe (Y, X, 1) when ffmpeg expects (Y, X)
-                        if self.target_pix_fmt in ("gray", "gray8", "gray16le") and frame.ndim == 3:
+                        #if self.target_pix_fmt in ("gray", "gray8", "gray16le") and frame.ndim == 3:
+                        if "gray" in input_pix_fmt and frame.ndim == 3:
                             frame = np.squeeze(frame)
                             # If squeezing made it (Y, X, 3), take channel 0
                             if frame.ndim == 3:
@@ -240,7 +252,19 @@ class FrameValidator(QThread):
                             continue
 
                         # C. Write
-                        frame = frame.astype("uint8")
+                        #frame = frame.astype("uint8")
+
+                        if input_pix_fmt == "gray16le":
+                            # If the TIF is Big-Endian, swap to Little-Endian for FFmpeg
+                            if frame.dtype.byteorder == '>' or (
+                                    frame.dtype.byteorder == '=' and sys.byteorder == 'big'):
+                                frame = frame.byteswap().newbyteorder('<')
+                            # Ensure it is definitely 16-bit
+                            frame = frame.astype('<u2', copy=False)
+                        else:
+                            # Fallback/Default to 8-bit for all other common cases
+                            frame = frame.astype('uint8', copy=False)
+
                         proc.stdin.write(frame.tobytes())
 
                         # D. Progress

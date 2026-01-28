@@ -4,6 +4,7 @@ from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
 logger = logging.getLogger(__name__)
 import re
 import os
+import sys
 from widgets.inspecting import get_video_info, get_tiff_summary
 from widgets.resources import FFMPEG, FFPROBE
 import subprocess
@@ -440,19 +441,26 @@ class FFmpegConverter(QThread):
     def _write_frame(self, proc, frame, idx, total, next_emit):
         """Helper to handle the byte writing and shape checks"""
         # Sanity check shape (ignore alpha channel if present, handled by pix_fmt)
-        if frame.ndim > 3 or (frame.ndim == 3 and frame.shape[-1] not in (3, 4)):
-            logger.warning(f"Frame {idx} has weird shape {frame.shape}, attempting write anyway.")
+        # Get the original bit depth
+        dtype = frame.dtype
 
-        # Ensure uint8
-        if frame.dtype != 'uint8':
-            # Fast cast if needed, though usually handled by TiffFile
-            frame = frame.astype("uint8")
+        # If it's already 8-bit, just send it
+        if dtype == 'uint8':
+            proc.stdin.write(frame.tobytes())
+            return
 
-        proc.stdin.write(frame.tobytes())
+        # If it's 16-bit (uint16), send the full 2-byte-per-pixel data
+        if dtype == 'uint16' or dtype == '<u2' or dtype == '>u2':
+            # Ensure Little Endian for FFmpeg 'gray16le'
+            if frame.dtype.byteorder == '>' or (frame.dtype.byteorder == '=' and sys.byteorder == 'big'):
+                frame = frame.byteswap().newbyteorder('<')
 
-        # Progress emission is handled in the loop to keep context of 'next_emit'
-        # but could be moved here if we pass 'self' and 'step'.
-        # Kept in loop for performance (function call overhead).
+            proc.stdin.write(frame.tobytes())
+            return
+
+        # Fallback for unexpected types (like float or int32)
+        logger.warning(f"Unexpected dtype {dtype} on frame {idx}. Casting to uint8 (Lossy!)")
+        proc.stdin.write(frame.astype('uint8').tobytes())
 
     def _process_video(self, frame_re, threads: int, slices: int):
         cmd = self._build_video_cmd(threads, slices)
