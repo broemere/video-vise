@@ -549,31 +549,63 @@ class MainWindow(QMainWindow):
         dlg = PixelDialog(fp, small_frame, parent=self)
         dlg.show()
 
+    # def start_convert(self, fp: Path, mode: str):
+    #     if str(fp) in self.frames:
+    #         nframes = self.frames[str(fp)]
+    #     else:
+    #         logger.debug(f"Frame count not cached for {fp}, running inspection...")
+    #         try:
+    #             info = get_video_info(fp)
+    #             nframes = info.get("frames", 0)
+    #             self.frames[str(fp)] = nframes
+    #         except Exception as e:
+    #             logger.error(f"Failed to inspect frames: {e}", exc_info=True)
+    #             nframes = 0
+    #
+    #     if mode == "compress":
+    #         out_fp = fp.with_name(fp.stem + ".mkv")
+    #     else:
+    #         out_fp = fp.with_name(fp.stem + "_RAW.avi")
+    #
+    #     self.status.setText(f"{mode.title()}ing {fp}")
+    #     self.progress.setValue(0)
+    #     self.worker = FFmpegConverter(fp, out_fp, nframes, mode, self.tracker.track_storage)
+    #     self.worker.progress.connect(self.update_progress)
+    #     self.worker.result.connect(self.on_conversion_result)
+    #     self.worker.finished.connect(lambda: self.update_table(self.path_edit.text()))
+    #     self.worker.start()
+
     def start_convert(self, fp: Path, mode: str):
-        if str(fp) in self.frames:
-            nframes = self.frames[str(fp)]
+        # 1. Ensure we have frame count (same as before)
+        fp_str = str(fp)
+        if fp_str in self.frames:
+            nframes = self.frames[fp_str]
         else:
-            logger.debug(f"Frame count not cached for {fp}, running inspection...")
-            try:
-                info = get_video_info(fp)
-                nframes = info.get("frames", 0)
-                self.frames[str(fp)] = nframes
-            except Exception as e:
-                logger.error(f"Failed to inspect frames: {e}", exc_info=True)
-                nframes = 0
+            info = get_video_info(fp)
+            nframes = info.get("frames", 0)
+            self.frames[fp_str] = nframes
 
-        if mode == "compress":
-            out_fp = fp.with_name(fp.stem + ".mkv")
-        else:
-            out_fp = fp.with_name(fp.stem + "_RAW.avi")
+        # 2. Add this specific task to the queue
+        task = (fp, mode)
 
-        self.status.setText(f"{mode.title()}ing {fp}")
-        self.progress.setValue(0)
-        self.worker = FFmpegConverter(fp, out_fp, nframes, mode, self.tracker.track_storage)
-        self.worker.progress.connect(self.update_progress)
-        self.worker.result.connect(self.on_conversion_result)
-        self.worker.finished.connect(lambda: self.update_table(self.path_edit.text()))
-        self.worker.start()
+        # Check if this exact task is already in the queue to avoid duplicates
+        if task not in self.batch_queue:
+            self.batch_queue.append(task)
+            # Update total tasks if you want the progress bar (e.g., 1/5) to be accurate
+            if self.worker is None or not self.worker.isRunning():
+                self.total_tasks = len(self.batch_queue)
+            else:
+                # If already running, increment total so the count (idx) makes sense
+                current_text = self.status.text()
+                self.total_tasks += 1
+                if "/" in current_text:
+                    prefix_text = current_text[:len(current_text)-(current_text[::-1].find("/"))]
+                    self.status.setText(f"{prefix_text}{self.total_tasks})")
+
+        # 3. Trigger the batch engine
+        # If a worker is already running, _run_next_batch will safely exit
+        # and the current worker's 'finished' signal will eventually pick up this new task.
+        self._run_next_batch()
 
     def on_conversion_result(self, key_name: str, result: int):
         if result > 0:
@@ -594,18 +626,51 @@ class MainWindow(QMainWindow):
         self._run_next_batch()
         # QTimer.singleShot(1000, self._run_next_batch) # cooldown
 
+    # def start_validate(self, fp: Path):
+    #     orig_fp = find_original_file(fp)
+    #     if orig_fp is not None:
+    #         nframes = self.frames[str(orig_fp)]
+    #         self.status.setText(f"Validating {fp} against {orig_fp}")
+    #         self.progress.setValue(0)
+    #         self.worker = FrameValidator(orig_fp, fp, nframes)
+    #         self.worker.progress.connect(self.update_progress)
+    #         self.worker.result.connect(self.on_validation_result)
+    #         self.worker.start()
+    #     else:
+    #         logger.error(f"File does not exist: {orig_fp}")
+
     def start_validate(self, fp: Path):
         orig_fp = find_original_file(fp)
-        if orig_fp is not None:
-            nframes = self.frames[str(orig_fp)]
-            self.status.setText(f"Validating {fp} against {orig_fp}")
-            self.progress.setValue(0)
-            self.worker = FrameValidator(orig_fp, fp, nframes)
-            self.worker.progress.connect(self.update_progress)
-            self.worker.result.connect(self.on_validation_result)
-            self.worker.start()
-        else:
-            logger.error(f"File does not exist: {orig_fp}")
+        if orig_fp is None:
+            logger.error(f"Validation failed: Could not find original file for {fp.name}")
+            return
+
+        # 1. Prepare Task
+        mode = "validate"
+        task = (fp, mode)
+
+        # Ensure we have frame count for the original (required for progress)
+        if str(orig_fp) not in self.frames:
+            info = get_video_info(orig_fp)
+            self.frames[str(orig_fp)] = info.get("frames", 0)
+
+        # 2. Add to Queue
+        if task not in self.batch_queue:
+            self.batch_queue.append(task)
+
+            if self.worker is None or not self.worker.isRunning():
+                self.total_tasks = len(self.batch_queue)
+            else:
+                # Apply your logic for updating n total tasks in the status bar
+                self.total_tasks += 1
+                current_text = self.status.text()
+                if "/" in current_text:
+                    # Finds the last slash and updates the number before the closing parenthesis
+                    prefix_text = current_text[:len(current_text) - (current_text[::-1].find("/"))]
+                    self.status.setText(f"{prefix_text}{self.total_tasks})")
+
+        # 3. Trigger Engine
+        self._run_next_batch()
 
     def on_validation_result(self, filename: str, ok: bool):
         self.lossless_results[filename] = ok
@@ -680,6 +745,12 @@ class MainWindow(QMainWindow):
         #current = threading.current_thread().name
         #logger.debug(f"_run_next_batch ENTERED (thread={current}). Full call stack:\n{stack}")
 
+        if self.worker is not None and self.worker.isRunning():
+            # Update UI to show progress of the queue
+            #idx = self.total_tasks - len(self.batch_queue)
+            #self.status.setText(f"Running task {idx}/{self.total_tasks} ({len(self.batch_queue)} queued)")
+            return
+
         if self.cancel_requested:
             logger.debug("_run_next_batch: cancel_requested=True → clearing queue and returning")
             self.batch_queue.clear()
@@ -699,11 +770,11 @@ class MainWindow(QMainWindow):
             self.flash_window()
             return
 
-        # If there is an existing worker still running, refuse to start a new one.
-        if self.worker is not None and self.worker.isRunning():
-            logger.error("_run_next_batch: Detected self.worker is still running → ABORT starting a second worker! queue length remains %d",
-                         len(self.batch_queue))
-            return
+        # # If there is an existing worker still running, refuse to start a new one.
+        # if self.worker is not None and self.worker.isRunning():
+        #     logger.error("_run_next_batch: Detected self.worker is still running → ABORT starting a second worker! queue length remains %d",
+        #                  len(self.batch_queue))
+        #     return
 
         next_fp, next_mode = self.batch_queue[0]
         idx = self.total_tasks - len(self.batch_queue) + 1
