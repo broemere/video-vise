@@ -196,14 +196,25 @@ class FrameValidator(QThread):
                     else:
                         h, w = shape_check[-2:]
 
-                # --- DYNAMIC FORMAT CHECK ---
-                # We use the actual dtype of the file to tell FFmpeg what to expect on stdin
-                input_pix_fmt = "gray8"
-                if series_dtype == np.uint16 or series_dtype == '>u2' or series_dtype == '<u2':
-                    input_pix_fmt = "gray16le"
-                elif series_dtype == np.uint8:
-                    input_pix_fmt = "gray8"
-                # Add more types here if you ever process RGB TIFs
+                # --- DYNAMIC FORMAT CHECK (FIXED) ---
+                # Determine how many channels we actually have in the data
+                # shape_check from your code above already has (H, W) or (H, W, C)
+                n_channels = 1
+                if len(shape_check) >= 3:
+                    n_channels = shape_check[-1]
+
+                    # Map the dtype and channels to an FFmpeg-friendly input format
+                is_16bit = (series_dtype == np.uint16 or series_dtype in ('>u2', '<u2'))
+
+                if n_channels == 3:
+                    input_pix_fmt = "rgb48le" if is_16bit else "rgb24"
+                elif n_channels == 4:
+                    # Handle bgr0/bgra style if encountered in TIFF
+                    input_pix_fmt = "rgba64le" if is_16bit else "rgba"
+                else:
+                    input_pix_fmt = "gray16le" if is_16bit else "gray8"
+
+                logger.debug(f"TIFF Validator detected: {n_channels} channels, 16bit={is_16bit} -> {input_pix_fmt}")
 
                 cmd = [
                     FFMPEG, "-f", "rawvideo",
@@ -252,19 +263,21 @@ class FrameValidator(QThread):
                             continue
 
                         # C. Write
-                        #frame = frame.astype("uint8")
-
-                        if input_pix_fmt == "gray16le":
-                            # If the TIF is Big-Endian, swap to Little-Endian for FFmpeg
+                        # We determine bit-depth once outside the loop (is_16bit)
+                        if is_16bit:
+                            # 1. Handle Endianness: FFmpeg's 'le' (little-endian) formats
+                            # require the least significant byte first.
                             if frame.dtype.byteorder == '>' or (
                                     frame.dtype.byteorder == '=' and sys.byteorder == 'big'):
                                 frame = frame.byteswap().newbyteorder('<')
-                            # Ensure it is definitely 16-bit
+
+                            # 2. Ensure the array is explicitly viewed as Little-Endian Unsigned 16-bit
                             frame = frame.astype('<u2', copy=False)
                         else:
-                            # Fallback/Default to 8-bit for all other common cases
+                            # 3. Standard 8-bit path for rgb24, gray8, etc.
                             frame = frame.astype('uint8', copy=False)
 
+                        # Now pipe the raw bytes to FFmpeg
                         proc.stdin.write(frame.tobytes())
 
                         # D. Progress

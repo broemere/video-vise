@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import numpy as np
 import threading
 import traceback
 from fractions import Fraction
@@ -39,12 +40,12 @@ instructions = (
 
     "<b>Usage Instructions:</b><br>"
     "1. Compress large AVI/TIF files for archiving on server<br>"
-    "2. Uncompress files on your computer for use with ImageJ<br>"
+    "2. Decompress files on your computer for use with ImageJ<br>"
 
     "<b>File Functions:</b><br>"
     "<i>Compress:</i> Compress video file.<br>"
-    "<i>Validate:</i> Compare AVI and MKV files to verify no data loss.<br>"
-    "<i>Uncompress:</i> Convert compressed video back to AVI.<br><br>"
+    "<i>Validate:</i> Compare AVI/TIF and MKV files to verify no data loss.<br>"
+    "<i>Decompress:</i> Convert compressed video back to AVI/TIF.<br><br>"
 
     "• Can run directly on server folders/files, but will be slower.<br>"
     "• Compressed videos cannot be opened directly in ImageJ.<br>"
@@ -52,12 +53,12 @@ instructions = (
     "• This app will never delete data, it will only create new files.<br>"
     "• Validation compares videos frame by frame for any pixel mismatches.<br><br>"
 
-    "This program takes files in raw/uncompressed format, and uses FFMPEG<br>"
+    "This program takes files in raw/decompressed format, and uses FFMPEG<br>"
     "to convert to .MKV with the FFV1 codec.<br>"
     "FFV1 is a modern lossless codec which is used by the Library of Congress,<br>"
     "the US National Archives, and universities for video archiving.<br>"
-    "FFV1 ensures no data loss, so the MKV files can be uncompressed back to the<br>"
-    "original AVI if necessary for compatibility on older software or hardware.<br><br>"
+    "FFV1 ensures no data loss, so the MKV files can be decompressed back to the<br>"
+    "original AVI/TIF if necessary for compatibility on older software or hardware.<br><br>"
 
     f"v{version}<br><br>"
 
@@ -81,76 +82,82 @@ class PixelLoaderThread(QThread):
         self.pix_fmt = pix_fmt
 
     def run(self):
-        if self.fp.suffix.lower() in (".tif", ".tiff"):
-            # Read the first page as a NumPy array
-            arr = imread(self.fp, key=0).astype("uint8")
-            # arr.shape is (H,W) for gray or (H,W,3) for RGB
-            if arr.ndim == 2:
-                # each row is a list of ints
-                frame = arr.tolist()
+        try:
+            if self.fp.suffix.lower() in (".tif", ".tiff"):
+                # Load the array - we remove the .astype("uint8") to allow 16-bit
+                arr = imread(self.fp, key=0)
+                if arr.ndim == 2:
+                    frame = arr.tolist()
+                else:
+                    frame = [[tuple(pixel) for pixel in row] for row in arr.tolist()]
+
             else:
-                # convert each [r,g,b] list into a tuple
-                frame = [
-                    [tuple(pixel) for pixel in row]
-                    for row in arr.tolist()
+                # Determine if we should ask for 16-bit or 8-bit output
+                is_16bit = "16" in self.pix_fmt or "48" in self.pix_fmt
+
+                # Use 'pgm' for grayscale, 'ppm' for RGB
+                # This is the "Intuitive" approach: FFmpeg handles all color math
+                is_gray = self.pix_fmt.lower().startswith("gray")
+                vcodec = "pgm" if is_gray else "ppm"
+
+                cmd = [
+                    str(FFMPEG), "-hide_banner", "-loglevel", "error",
+                    "-i", str(self.fp),
+                    "-frames:v", "1",
+                    "-f", "image2pipe",
+                    "-vcodec", vcodec,
+                    "pipe:1"
                 ]
-        else:
-            cmd = [
-                FFMPEG, "-hide_banner", "-loglevel", "error",
-                "-ss", "0",
-                "-i", str(self.fp),
-                "-frames:v", "1",
-                "-f", "image2pipe",
-                "-vcodec", "ppm",              # P6 Portable Pixmap
-                "pipe:1"
-            ]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-            stdout = proc.stdout
 
-            # PPM header
-            magic = stdout.readline().strip()      # b'P6'
-            line  = stdout.readline()
-            while line.startswith(b'#'):          # skip comments
-                line = stdout.readline()
-            width, height = map(int, line.split())
-            stdout.readline()                      # skip maxval line
+                # Use communicate to prevent the deadlock/hang you saw earlier
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdout_data, stderr_data = proc.communicate()
 
-            # read all RGB triples
-            n_bytes = width * height * 3
-            raw = stdout.read(n_bytes)
-            proc.wait()
+                if proc.returncode != 0:
+                    print(f"FFmpeg Error: {stderr_data.decode()}")
+                    return
 
-            flat = list(raw)
-            frame = []
-            idx = 0
-            if self.pix_fmt.lower().startswith("gray"):
-                # treat each 3-byte group as one gray value, skip the other two
-                for _ in range(height):
-                    row = []
-                    for _ in range(width):
-                        gray = flat[idx]  # R == G == B
-                        row.append(gray)
-                        idx += 3  # jump to next pixel
-                    frame.append(row)
-            else:
-                # full RGB parsing
-                for _ in range(height):
-                    row = []
-                    for _ in range(width):
-                        r = flat[idx]
-                        g = flat[idx + 1]
-                        b = flat[idx + 2]
-                        row.append((r, g, b))
-                        idx += 3
-                    frame.append(row)
+                # --- DYNAMIC NETPBM PARSING ---
+                # We don't hardcode stdout.readline() because communicate() gives us one big blob
+                lines = stdout_data.split(b'\n', 3)
+                magic = lines[0].strip()  # P5 (Gray) or P6 (RGB)
 
-        # 3) slice to top-left 10×10 (or smaller)
-        h_slice = min(5, self.h)
-        w_slice = min(5, self.w)
-        small_frame = [r[:w_slice] for r in frame[:h_slice]]
+                # Handle potential comments in header
+                header_offset = 1
+                if lines[header_offset].startswith(b'#'):
+                    header_offset += 1
 
-        # 4) emit back to GUI thread
-        self.finished.emit(self.fp, small_frame)
+                dims = lines[header_offset].split()
+                w, h = int(dims[0]), int(dims[1])
+                maxval = int(lines[header_offset + 1])
+
+                # Find where the raw data actually starts
+                # Netpbm headers end with a single whitespace character after MaxVal
+                data_start = stdout_data.find(str(maxval).encode()) + len(str(maxval)) + 1
+                raw_bytes = stdout_data[data_start:]
+
+                # Interpret bytes based on MaxVal (8-bit if 255, 16-bit if 65535)
+                dtype = np.dtype('>u2') if maxval > 255 else np.uint8  # Netpbm 16-bit is Big-Endian
+                flat_arr = np.frombuffer(raw_bytes, dtype=dtype)
+
+                # Reshape and convert to list
+                if magic == b'P5':  # Grayscale
+                    arr = flat_arr.reshape((h, w))
+                    frame = arr.tolist()
+                else:  # RGB (P6)
+                    arr = flat_arr.reshape((h, w, 3))
+                    frame = [[tuple(pixel) for pixel in row] for row in arr.tolist()]
+
+            # Slice to top-left 10×10 for the UI
+            h_slice = min(10, self.h)
+            w_slice = min(10, self.w)
+            small_frame = [r[:w_slice] for r in frame[:h_slice]]
+
+            self.finished.emit(self.fp, small_frame)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
 class PixelDialog(QDialog):
     def __init__(self, fp, small_frame, parent=None):

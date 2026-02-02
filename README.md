@@ -1,6 +1,6 @@
 # VideoVise
 
-A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV videos using FFmpeg, with built-in validation and uncompression back to AVI.
+A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV videos using FFmpeg, with built-in validation and decompression back to AVI/TIF.
 
 ---
 
@@ -8,7 +8,7 @@ A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV 
 
 - **Batch conversion** of AVI or multi-page TIFF files into MKV  
 - **Validation** step to confirm no pixel data was lost or altered  
-- **Uncompress** back to AVI for legacy workflows (e.g. ImageJ)  
+- **Decompress** back to AVI or TIF for legacy workflows (e.g. ImageJ)  
 - A clean GUI with comprehensive file metadata details/inspection
 
 ---
@@ -90,7 +90,7 @@ or
 3. Click Convert to compress the raw data into a lossless mkv video
 4. Click Validate to double-check that the conversion was successful and there was no pixel data loss
 5. Safely delete your original image data
-6. Click Uncompress to convert the mkv back to an avi if necessary (for legacy hardware/software like ImageJ)
+6. Click Decompress to convert the mkv back to an avi/tif if necessary (for legacy hardware/software like ImageJ)
 
 ---
 

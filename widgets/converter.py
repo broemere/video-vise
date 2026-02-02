@@ -1,100 +1,61 @@
-from pathlib import Path
 import logging
-from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
 logger = logging.getLogger(__name__)
 import re
 import os
 import sys
+import subprocess
+import numpy as np
+from pathlib import Path
+from tifffile import TiffFile, TiffWriter
+from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
+from config import DEFAULT_FPS
 from widgets.inspecting import get_video_info, get_tiff_summary
 from widgets.resources import FFMPEG, FFPROBE
-import subprocess
-from tifffile import TiffFile
-from statistics import median
-import json
-from config import DEFAULT_FPS
 
 class FFmpegConverter(QThread):
     progress = Signal(int)
     result = Signal(str, int)
     failed = Signal(Path, str)
 
-    def __init__(self, input_path: Path, output_path: Path, frames: int, mode: str, track: bool):
+    def __init__(self, input_path: Path, output_path: Path, frames: int, mode: str, track: bool, in_fmt: str):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
         self.frames = frames
         self.mode = mode
         self.track = track
+        self.in_fmt = in_fmt
 
     def run(self):
         logger.debug(
             f"FFmpegConverter thread STARTED: input={self.input_path}, "
-            f"output={self.output_path}, frames={self.frames}, mode={self.mode!r}"
+            f"output={self.output_path}, frames={self.frames}, mode={self.mode!r}, input_format={self.in_fmt}"
         )
         try:
-            frame_re = re.compile(r"frame=\s*(\d+)\b")
             cpu_count = os.cpu_count() or 1
             threads = 3 if cpu_count == 4 else min(max(cpu_count - 2, 1), 16) # Changed from 4 to 2 for 6 core devices
             # Maybe improve this logic again for different size CPUs (small and large)
             slices = self.choose_slices(threads)
 
-            if self._is_tiff():
-                self._process_tiff(frame_re, threads, slices)
+            if self.input_path.suffix.lower() in [".tif", ".tiff"]:
+                self._process_tiff(threads, slices)
             else:
-                self._process_video(frame_re, threads, slices)
+                self._process_video(threads, slices)
+
+            logger.debug("Process function returned. Finalizing metadata...")
 
             stat = self.input_path.stat()
             os.utime(self.output_path, (stat.st_atime, stat.st_mtime))
 
-            # finish up
-            self.progress.emit(100)
+            self.progress.emit(100)  # Finish
             if self.track:
                 self._emit_size_diff()
         except Exception as e:
-            # This block will catch any crashes and log the traceback
-            logger.error(f"WORKER CRASHED processing {self.input_path}!", exc_info=True)
+            logger.error(f"WORKER CRASHED processing {self.input_path}!", exc_info=True)  # Catch crashes and log traceback
             self.failed.emit(self.input_path, str(e))
 
-    def _is_tiff(self) -> bool:
-        return self.input_path.suffix.lower() in [".tif", ".tiff"]
-
-    # def _process_tiff(self, frame_re, threads: int, slices: int):
-    #     # 1) extract metadata
-    #     fps, pix_fmt, w, h = self._extract_tiff_metadata()
-    #
-    #     # 2) build & spawn ffmpeg
-    #     cmd = [
-    #         FFMPEG, "-y",
-    #         "-f", "rawvideo",
-    #         "-pix_fmt", pix_fmt,
-    #         "-s", f"{w}x{h}",
-    #         "-r", f"{fps:.3f}",
-    #         "-i", "pipe:0",
-    #         "-an",
-    #         "-c:v", "ffv1",
-    #         "-level", "3",
-    #         "-threads", str(threads),
-    #         "-coder", "1", "-context", "1",
-    #         "-g", "1", "-slices", str(slices),
-    #         "-slicecrc", "1",
-    #         str(self.output_path)
-    #     ]
-    #     logger.info("Spawning FFmpeg process: " + " ".join(cmd))
-    #     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    #     logger.debug(f"Launched FFmpeg (PID={proc.pid})")
-    #
-    #     # 3) stream frames & report progress
-    #     self._stream_tiff_frames(proc)
-    #
-    #     if proc.wait() != 0:
-    #         raise RuntimeError("FFmpeg TIFF→video failed")
-
-    def _process_tiff(self, frame_re, threads: int, slices: int):
-        # --- 1. LEVERAGE THE INSPECTOR ---
-        # No more manual parsing here. We trust the robust inspector logic.
+    def _process_tiff(self, threads: int, slices: int):
         info = get_video_info(self.input_path)
-
-        # Parse result (inspector returns strings, so we cast as needed)
         fps = float(info.get("raw_fps", DEFAULT_FPS))  # Use raw_fps if available for precision
         if fps == 0: fps = DEFAULT_FPS  # Fallback
 
@@ -102,7 +63,6 @@ class FFmpegConverter(QThread):
         w = info.get("width", "0")
         h = info.get("height", "0")
 
-        # --- 2. BUILD FFMPEG CMD ---
         cmd = [
             FFMPEG, "-y",
             "-f", "rawvideo",
@@ -122,218 +82,9 @@ class FFmpegConverter(QThread):
 
         logger.info(f"Spawning FFmpeg TIF conversion: {w}x{h} @ {fps}fps fmt:{pix_fmt}")
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-
-        # --- 3. STREAM FRAMES ---
         self._stream_tiff_frames(proc)
-
         if proc.wait() != 0:
             raise RuntimeError("FFmpeg TIFF→video failed (non-zero exit code)")
-    #
-    # def _find_tiff_pages(self, tif):
-    #     """
-    #     Helper function to analyze the TIF and return a universal
-    #     frame iterator and the total frame count, handling all
-    #     three of your defined scenarios.
-    #     """
-    #
-    #     # --- CASE 3: Multi-Series (Each series is one frame) ---
-    #     # e.g., 7354 series, each is a single (2048, 2592) image
-    #     if len(tif.series) > 1:
-    #         total_frames = len(tif.series)
-    #         frame_iterator = (series.asarray() for series in tif.series)
-    #         return frame_iterator, total_frames
-    #
-    #     # --- CASES 1 & 2: Single-Series ---
-    #     # If we are here, len(tif.series) == 1
-    #
-    #     main_series = tif.series[0]
-    #
-    #     if not main_series.pages:
-    #         logger.warning(f"TIF file {self.input_path} series[0] has no pages.")
-    #         # Check if the series as a whole is a stack
-    #         stack_data = main_series.asarray()
-    #         if stack_data.ndim > 2:  # It's a hyperstack (N, Y, X)
-    #             total_frames = stack_data.shape[0]
-    #             frame_iterator = (frame for frame in stack_data)
-    #             return frame_iterator, total_frames
-    #         elif stack_data.ndim == 2:  # It's a single 2D image
-    #             total_frames = 1
-    #             frame_iterator = [stack_data]
-    #             return frame_iterator, total_frames
-    #         else:
-    #             return [], 0  # Empty/unsupported
-    #
-    #     n_pages_in_series = len(main_series.pages)
-    #
-    #     # --- CASE 1: Standard Multi-Page ---
-    #     # (e.g., 1 series, 3475 pages, shape (3475, 800, 800))
-    #     # Note: We check > 1 because Case 2 has 1 page.
-    #     if n_pages_in_series > 1:
-    #         total_frames = n_pages_in_series
-    #         # This is your original, efficient iterator
-    #         frame_iterator = (page.asarray() for page in main_series.pages)
-    #         return frame_iterator, total_frames
-    #
-    #     # --- CASE 2: Single-Page Hyperstack (or just a single image) ---
-    #     # (e.g., 1 series, 1 page, but series.shape is (3475, 800, 800))
-    #     if n_pages_in_series == 1:
-    #
-    #         # Must load the whole page to know what's in it.
-    #         # This is the big memory load for this file type.
-    #         stack_data = main_series.asarray()
-    #
-    #         # Check if it's a stack (N, Y, X) or just one frame (Y, X)
-    #         if stack_data.ndim > 2:
-    #             # It's a Hyperstack (N, Y, X)
-    #             total_frames = stack_data.shape[0]
-    #             frame_iterator = (frame for frame in stack_data)
-    #             return frame_iterator, total_frames
-    #         else:
-    #             # It's just a single 2D image (Y, X)
-    #             total_frames = 1
-    #             frame_iterator = [stack_data]  # A list containing the single frame
-    #             return frame_iterator, total_frames
-    #
-    #     # Fallback for empty/weird files
-    #     return [], 0
-    #
-    # def _get_metadata_source(self, tif):
-    #     """
-    #     Analyzes the TIF and returns the source for the first frame's
-    #     metadata and the correct list of all pages/series.
-    #
-    #     Returns:
-    #         (first_frame_source, all_pages_source)
-    #     """
-    #
-    #     # --- CASE 3: Multi-Series (Each series is one frame) ---
-    #     if len(tif.series) > 1:
-    #         logger.info("Metadata Source: Case 3 (Multi-Series)")
-    #         # The first frame is the first series
-    #         # The list of all "pages" is the list of all series
-    #         return tif.series[0], tif.series
-    #
-    #     # --- CASES 1 & 2: Single-Series ---
-    #     elif len(tif.series) == 1:
-    #         main_series = tif.series[0]
-    #
-    #         if not main_series.pages:
-    #             raise ValueError("TIF file series[0] contains no pages.")
-    #
-    #         if len(main_series.pages) == 1:
-    #             logger.info("Metadata Source: Case 2 (Hyperstack / Single Page)")
-    #         else:
-    #             logger.info("Metadata Source: Case 1 (Standard Multi-Page)")
-    #
-    #         # The first frame is the first page of the main series
-    #         # The list of all "pages" is the list of pages in the main series
-    #         return main_series.pages[0], main_series.pages
-    #
-    #     # Fallback for empty/unreadable TIF
-    #     else:
-    #         raise ValueError("TIF file contains no series.")
-    #
-    # def _extract_tiff_metadata(self):
-    #     with TiffFile(self.input_path) as tif:
-    #
-    #         # --- Robustly find the first frame and page list ---
-    #         first_page_source, all_pages = self._get_metadata_source(tif)
-    #
-    #         # --- Get pixel format, width, and height ---
-    #
-    #         # This .asarray() call is still the "danger zone" for Case 2.
-    #         # It will load the entire hyperstack into memory.
-    #         # But this is unavoidable if we need to check its dimensions.
-    #         first_frame_data = first_page_source.asarray()
-    #
-    #         h, w = (0, 0)
-    #
-    #         if first_frame_data.ndim == 2:
-    #             # Case 1 or 3: (Y, X)
-    #             pix_fmt = "gray"
-    #             h, w = first_frame_data.shape
-    #             logger.info(f"Found grayscale tif data (shape: {first_frame_data.shape})")
-    #
-    #         elif first_frame_data.ndim == 3 and first_frame_data.shape[-1] == 3:
-    #             # Case 1 or 3: (Y, X, 3)
-    #             pix_fmt = "rgb24"
-    #             h, w = first_frame_data.shape[:2]
-    #             logger.info(f"Found rgb tif data (shape: {first_frame_data.shape})")
-    #
-    #         elif first_frame_data.ndim > 3 and first_frame_data.shape[-1] == 3:
-    #             # Case 2: Hyperstack (Z, Y, X, 3)
-    #             pix_fmt = "rgb24"
-    #             h, w = first_frame_data.shape[-3:-1]  # Get Y and X
-    #             logger.info(f"Found RGB hyperstack (shape: {first_frame_data.shape})")
-    #
-    #         elif first_frame_data.ndim > 2:
-    #             # Case 2: Hyperstack (Z, Y, X)
-    #             pix_fmt = "gray"
-    #             h, w = first_frame_data.shape[-2:]  # Get Y and X
-    #             logger.info(f"Found grayscale hyperstack (shape: {first_frame_data.shape})")
-    #
-    #         else:
-    #             raise ValueError(f"Unsupported shape: {first_frame_data.shape}")
-    #
-    #         # --- fps logic (no change needed for ImageJ part) ---
-    #         imgj = tif.imagej_metadata or {}
-    #         fps = DEFAULT_FPS
-    #
-    #         if imgj:
-    #             fps = imgj.get("fps", 0)
-    #             logger.info(f"Acquired frame rate from tif metadata: {fps}")
-    #         else:
-    #             # --- THIS IS THE SECOND FIX ---
-    #             # We now iterate over the *correct* list (all_pages)
-    #             logger.debug(f"Scanning {len(all_pages)} pages/series for deviceTime...")
-    #             times: list[float] = []
-    #
-    #             # This loop now works for Case 1, 2, and 3
-    #             for item in all_pages:
-    #                 page_with_tags = None
-    #                 # 'item' can be a TiffPage (Cases 1, 2) or TiffPageSeries (Case 3)
-    #                 if hasattr(item, 'tags'):
-    #                     # This is a TiffPage (Cases 1 & 2)
-    #                     page_with_tags = item
-    #                 elif hasattr(item, 'pages') and item.pages:
-    #                     # This is a TiffPageSeries (Case 3). Get its first page.
-    #                     page_with_tags = item.pages[0]
-    #
-    #                 if not page_with_tags:
-    #                     continue  # Skip if we couldn't find a page with tags
-    #
-    #                 # Now we safely access .tags on a valid TiffPage object
-    #                 desc = page_with_tags.tags.get("ImageDescription")
-    #                 if not desc:
-    #                     continue
-    #                 try:
-    #                     desc_val = desc.value
-    #                     if isinstance(desc_val, bytes):
-    #                         desc_val = desc_val.decode('utf-8')
-    #                     info = json.loads(desc_val)
-    #                 except Exception:
-    #                     continue
-    #
-    #                 t = info.get("deviceTime")
-    #                 if isinstance(t, (int, float)):
-    #                     times.append(t)
-    #
-    #             # Stop scanning if we are in Case 2 (Hyperstack) and have 0 times
-    #             if len(all_pages) == 1 and not times:
-    #                 logger.debug("Hyperstack has no deviceTime tag in its description.")
-    #
-    #             if len(times) >= 2:
-    #                 deltas = [t2 - t1 for t1, t2 in zip(times, times[1:]) if (t2 - t1) > 0]
-    #                 median_dt = median(deltas) if deltas else 0.1
-    #                 fps = 1.0 / median_dt
-    #                 logger.info(f"Derived frame rate from deviceTime: {fps}")
-    #             else:
-    #                 logger.debug(f"Cannot parse frame rate from this tif, falling back to default {DEFAULT_FPS}")
-    #
-    #         # ensure non-negative
-    #         fps = max(fps, 1)
-    #
-    #     return fps, pix_fmt, w, h
 
     def _stream_tiff_frames(self, proc):
         """
@@ -345,12 +96,7 @@ class FFmpegConverter(QThread):
 
         try:
             with TiffFile(self.input_path) as tif:
-                # --- LEVERAGE INSPECTOR STRUCTURE LOGIC ---
                 _, access_strategy, total_frames, _, _ = get_tiff_summary(tif)
-
-                if total_frames == 0:
-                    logger.error("No frames found to process.")
-                    return
 
                 logger.info(f"Beginning stream of {total_frames} frames...")
 
@@ -365,11 +111,9 @@ class FFmpegConverter(QThread):
 
                     for idx, frame in enumerate(data_stack, start=1):
                         self._write_frame(proc, frame, idx, total_frames, next_emit)
-
-                        # --- PROGRESS UPDATE ---
                         pct = min(int(idx / total_frames * 100), 100)
                         if pct >= next_emit:
-                            self.progress.emit(pct)  # <--- THIS WAS MISSING
+                            self.progress.emit(pct)
                             next_emit = (pct // step + 1) * step
                 else:
                     # CASES 1 & 3: Page/Series Iteration
@@ -377,13 +121,10 @@ class FFmpegConverter(QThread):
                         # Lazy load the page
                         page_obj = access_strategy[idx]
                         frame = page_obj.asarray()
-
                         self._write_frame(proc, frame, idx + 1, total_frames, next_emit)
-
-                        # --- PROGRESS UPDATE ---
                         pct = min(int((idx + 1) / total_frames * 100), 100)
                         if pct >= next_emit:
-                            self.progress.emit(pct)  # <--- THIS WAS MISSING
+                            self.progress.emit(pct)
                             next_emit = (pct // step + 1) * step
 
         except Exception as e:
@@ -395,48 +136,6 @@ class FFmpegConverter(QThread):
                     proc.stdin.close()
                 except IOError:
                     pass
-
-    # def _stream_tiff_frames(self, proc):
-    #     step = 3
-    #     next_emit = step
-    #
-    #     try:
-    #         with TiffFile(self.input_path) as tif:
-    #             frame_iterator, total_frames = self._find_tiff_pages(tif)
-    #             if total_frames == 0:
-    #                 logger.error("No frames found to process.")
-    #                 return
-    #             logger.info(f"Beginning stream of {total_frames} total frames...")
-    #
-    #             # This loop now works for all cases
-    #             for idx, frame_data in enumerate(frame_iterator, start=1):
-    #                 # Your original logic
-    #                 if frame_data.ndim > 3 or (frame_data.ndim == 3 and frame_data.shape[-1] != 3):
-    #                     logger.error(f"Frame {idx} has unexpected shape {frame_data.shape}, skipping.")
-    #                     continue
-    #                 frame = frame_data.astype("uint8")
-    #                 proc.stdin.write(frame.tobytes())
-    #
-    #                 # Use the *correct* total_frames for percentage
-    #                 pct = min(int(idx / total_frames * 100), 100)
-    #                 if pct >= next_emit:
-    #                     try:
-    #                         self.progress.emit(pct)  # Your original line
-    #                     except Exception as e:
-    #                         logger.error(f"Error emitting progress: {e}")
-    #                     next_emit = (pct // step + 1) * step  # More robust step logic
-    #
-    #     except Exception as e:
-    #         logger.error(f"Error streaming TIFF: {e}")
-    #         # Ensure proc is closed on error
-    #
-    #     finally:
-    #         if proc and proc.stdin:
-    #             try:
-    #                 proc.stdin.close()
-    #                 logger.info("Stream closed.")
-    #             except IOError as e:
-    #                 logger.error(f"Error closing stream (may already be closed): {e}")
 
     def _write_frame(self, proc, frame, idx, total, next_emit):
         """Helper to handle the byte writing and shape checks"""
@@ -462,10 +161,16 @@ class FFmpegConverter(QThread):
         logger.warning(f"Unexpected dtype {dtype} on frame {idx}. Casting to uint8 (Lossy!)")
         proc.stdin.write(frame.astype('uint8').tobytes())
 
-    def _process_video(self, frame_re, threads: int, slices: int):
-        cmd = self._build_video_cmd(threads, slices)
-        logger.info(f"Spawning FFmpeg {'compress' if self.mode=='compress' else 'uncompress'} process: " + " ".join(cmd))
+    def _process_video(self, threads: int, slices: int):
+        out_ext = self.output_path.suffix.lower()
+        if self.mode == "decompress" and out_ext in [".tif", ".tiff"]:
+            logger.info(f"Using TiffWriter for: {self.output_path.name}")
+            self._decompress_to_tiff_stack(threads)
+            return
 
+        cmd = self._build_video_cmd(threads, slices)
+        frame_re = re.compile(r"frame=\s*(\d+)\b")
+        logger.info(f"Spawning FFmpeg {'compress' if self.mode=='compress' else 'decompress'} process: " + " ".join(cmd))
         proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True)
         logger.debug(f"Launched FFmpeg (PID={proc.pid})")
 
@@ -495,11 +200,98 @@ class FFmpegConverter(QThread):
                 str(self.output_path)
             ]
         else:
+            if "yuv" in self.in_fmt:
+                target = "bgr24"
+            elif "16" in self.in_fmt:
+                target = "bgr48le" if any(x in self.in_fmt for x in ["rgb", "bgr", "0"]) else "gray16le"
+            else:
+                target = "bgr24" if any(x in self.in_fmt for x in ["rgb", "bgr", "0"]) else "gray"
+
             return base + [
                 "-vcodec", "rawvideo",
+                "-vf", f"format={target}",  # Explicitly handles the YUV -> BGR conversion
+                "-pix_fmt", target,
                 "-acodec", "copy",
                 str(self.output_path)
             ]
+
+    def _decompress_to_tiff_stack(self, threads: int):
+        # 1. Inspect the source to get dimensions and format
+        info = get_video_info(self.input_path)
+        w = int(info.get("width", 0))
+        h = int(info.get("height", 0))
+        pix_fmt = info.get("pix_fmt", "gray")  # Default
+        channels = 3 if any(x in pix_fmt for x in ["rgb", "gbr", "bgr"]) else 1
+
+        # Determine data types
+        if "16" in pix_fmt:
+            dtype = np.uint16
+            bpp = 2
+            # Ensure we use a format FFmpeg and Numpy agree on
+            target_pix_fmt = "rgb48le" if channels == 3 else "gray16le"
+        else:
+            dtype = np.uint8
+            bpp = 1
+            target_pix_fmt = "rgb24" if channels == 3 else "gray"
+
+        frame_size = w * h * channels * bpp
+
+        # 2. Command: Output RAW pixels to stdout (pipe:1)
+        cmd = [
+            FFMPEG, "-y",
+            "-i", str(self.input_path),
+            "-vf", f"format={target_pix_fmt}",  # Force the flip here
+            "-f", "rawvideo",
+            "-pix_fmt", target_pix_fmt,
+            "-threads", str(threads),
+            "-loglevel", "error",  # Minimize stderr noise
+            "pipe:1"
+        ]
+
+        logger.info(f"Decompressing to TIFF Stack: {w}x{h}, {channels}ch, {dtype.__name__}")
+
+        # 3. Stream and Write
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10 ** 8)
+
+        count = 0
+        try:
+            # bigtiff=True is critical for >4GB files
+            with TiffWriter(self.output_path, bigtiff=True) as tif:
+                while True:
+                    raw_frame = proc.stdout.read(frame_size)
+                    if len(raw_frame) < frame_size:
+                        break
+
+                    # Reshape raw bytes to 2D image
+                    if channels == 3:
+                        frame_array = np.frombuffer(raw_frame, dtype=dtype).reshape((h, w, 3))
+                    else:
+                        frame_array = np.frombuffer(raw_frame, dtype=dtype).reshape((h, w))
+                    tif.write(frame_array, contiguous=True)
+
+                    # Update progress every 5 frames
+                    count += 1
+                    if self.frames and count % 5 == 0:
+                        self.progress.emit(min(int(count / self.frames * 100), 100))
+
+            proc.wait()
+            logger.info(f"TiffWriter finished. Wrote {count} frames.")
+
+            # This is why the UI didn't progress! You must emit the result
+            # so MainWindow knows this worker is finished.
+            #self.progress.emit(100)
+
+        except Exception as e:
+            logger.error(f"Error in TIFF decompression: {e}")
+            raise  # Pass to the 'run' method's catch block
+
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            ret_code = proc.wait()
+            if ret_code != 0:
+                err = proc.stderr.read().decode()
+                logger.error(f"FFmpeg Pipe Error (Code {ret_code}): {err}")
 
     def _emit_size_diff(self):
         try:
@@ -510,7 +302,7 @@ class FFmpegConverter(QThread):
                 diff = 0
         except Exception:
             diff = 0
-        if self.mode == "uncompress":
+        if self.mode == "decompress":
             diff = 0
 
         name = str(self.input_path.name)[:-4].replace(" ", "")

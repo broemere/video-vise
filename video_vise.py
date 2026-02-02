@@ -1,12 +1,9 @@
 import datetime
-import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 import gc
-from random import sample
 
 # Third-Party Imports
 from PySide6.QtCore import QSettings, Qt, QTimer, Slot, QDir
@@ -15,7 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QSplashScreen, QStyle, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget
+    QTableWidgetItem, QVBoxLayout, QWidget, QComboBox
 )
 from widgets.file_scanning import find_file_on_network_drives, find_original_file, get_files, load_storage_jsonl
 from widgets.resources import setup_logging, icon_path
@@ -42,6 +39,7 @@ class MainWindow(QMainWindow):
         self.durations = {}
         self.frames = {}
         self.codecs = {}
+        self.formats = {}
         self.sizes = {}
         self.video_info_cache: dict[str, dict] = {}
         self.cancel_requested = False
@@ -105,7 +103,7 @@ class MainWindow(QMainWindow):
         self.table.setPalette(pal)
         cols = [
             " ", "Filename","Size (GB)","Modified","Duration","Codec","PixelFmt",
-            "Resolution","Tag","Color/Gray","FPS","Frames","Compress","Validate","Lossless", "Relative Size", "Uncompress", "Inspect"
+            "Resolution","Tag","Color/Gray","FPS","Frames","Compress","Validate","Lossless", "Relative Size", "Decompress", "Inspect"
         ]
         self.table.setColumnCount(len(cols)); self.table.setHorizontalHeaderLabels(cols)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -115,17 +113,33 @@ class MainWindow(QMainWindow):
         batch_layout = QHBoxLayout()
         self.btn_batch_compress = QPushButton("Compress All"); self.btn_batch_compress.clicked.connect(self.process_all_compress)
         self.btn_batch_validate = QPushButton("Validate All"); self.btn_batch_validate.clicked.connect(self.process_all_validate)
-        self.btn_batch_uncompress = QPushButton("Uncompress All"); self.btn_batch_uncompress.clicked.connect(self.process_all_uncompress)
+        self.btn_batch_decompress = QPushButton("Decompress All"); self.btn_batch_decompress.clicked.connect(self.process_all_decompress)
         self.btn_batch_compress_validate = QPushButton("Compress and Validate All");
         self.btn_batch_compress_validate.clicked.connect(self.process_all_compress_validate)
         self.btn_cancel = QPushButton(self.style().standardIcon(QStyle.SP_BrowserStop), "Cancel"); self.btn_cancel.clicked.connect(self.cancel_batch)
         self.btn_cancel.setEnabled(False)
+
+        dropdown_container = QVBoxLayout()
+        dropdown_container.setSpacing(2)  # Small space between label and box
+
+        format_label = QLabel("Decompress format:")
+        format_label.setStyleSheet("font-size: 10px;")  # Optional styling
+
+        self.format_dropdown = QComboBox()
+        self.format_dropdown.addItems(["AVI", "TIF"])
+        self.format_dropdown.setCurrentText("AVI")
+
+        dropdown_container.addWidget(format_label)
+        dropdown_container.addWidget(self.format_dropdown)
         batch_layout.addWidget(self.btn_cancel)
         batch_layout.addStretch()
+        batch_layout.addLayout(dropdown_container)
+        batch_layout.addSpacing(20)
         for btn in [self.btn_batch_compress, self.btn_batch_validate,
-                    self.btn_batch_uncompress, self.btn_batch_compress_validate]:
+                    self.btn_batch_decompress, self.btn_batch_compress_validate]:
             btn.setMinimumHeight(40)
             batch_layout.addWidget(btn)
+
         layout.addLayout(batch_layout)
 
         status_layout = QHBoxLayout()
@@ -261,6 +275,8 @@ class MainWindow(QMainWindow):
             stat_map[fp_key] = st
 
             self.sizes[fp_key] = st.st_size
+
+            self.formats[fp_key] = info.get("pix_fmt", "")
 
             # Progress: probing progress (not UI progress)
             if len(files_only) > 0:
@@ -430,7 +446,7 @@ class MainWindow(QMainWindow):
                     if frames == 1:
                         self._fade_row(r, tooltip="Single-frame file (compression not applicable).")
 
-                # — Column 13 & 16: Validate & Uncompress Buttons
+                # — Column 13 & 16: Validate & Decompress Buttons
                 if codec == "ffv1":
                     # 1. Check for original source file
                     source_fp = source_map.get(fp_key)
@@ -446,9 +462,9 @@ class MainWindow(QMainWindow):
                         lbl.setStyleSheet("color: #777; font-style: italic;")
                         self.table.setCellWidget(r, 13, lbl)
 
-                    # — Column 16: Uncompress (Always available for FFV1)
-                    btnd = QPushButton("Uncompress")
-                    btnd.clicked.connect(lambda _, p=fp: self.start_convert(p, "uncompress"))
+                    # — Column 16: Decompress (Always available for FFV1)
+                    btnd = QPushButton("Decompress")
+                    btnd.clicked.connect(lambda _, p=fp: self.start_convert(p, "decompress"))
                     self.table.setCellWidget(r, 16, btnd)
 
                 # — Column 14: Lossless Icon
@@ -576,6 +592,8 @@ class MainWindow(QMainWindow):
     #     self.worker.start()
 
     def start_convert(self, fp: Path, mode: str):
+        fmt = self.format_dropdown.currentText().lower()
+        print(fmt)
         # 1. Ensure we have frame count (same as before)
         fp_str = str(fp)
         if fp_str in self.frames:
@@ -586,7 +604,7 @@ class MainWindow(QMainWindow):
             self.frames[fp_str] = nframes
 
         # 2. Add this specific task to the queue
-        task = (fp, mode)
+        task = (fp, mode, fmt)
 
         # Check if this exact task is already in the queue to avoid duplicates
         if task not in self.batch_queue:
@@ -704,10 +722,11 @@ class MainWindow(QMainWindow):
         tasks = [(fp, 'compress') for fp in files if self.frames.get(str(fp), 0) > 1 and self.codecs.get(str(fp), "") != "mjpeg"]
         self.start_batch(tasks)
 
-    def process_all_uncompress(self):
+    def process_all_decompress(self):
         folder = self.path_edit.text()
         files = get_files(folder, "validate")
-        tasks = [(fp, 'uncompress') for fp in files]
+        fmt = self.format_dropdown.currentText().lower()  # "avi" or "tif"
+        tasks = [(fp, 'decompress', fmt) for fp in files]
         self.start_batch(tasks)
 
     def process_all_validate(self):
@@ -776,14 +795,20 @@ class MainWindow(QMainWindow):
         #                  len(self.batch_queue))
         #     return
 
-        next_fp, next_mode = self.batch_queue[0]
+        next_task = self.batch_queue[0]
+        next_mode = next_task[1]
         idx = self.total_tasks - len(self.batch_queue) + 1
         # Update the table if we had >0 compresss, and we're about to run the first validate:
         if self.num_compress > 0 and next_mode == 'validate' and idx == self.num_compress + 1:
             logger.debug("All compress tasks finished → calling update_table() before starting validation")
             self.update_table(self.path_edit.text())
 
-        fp, mode = self.batch_queue.pop(0)
+        task = self.batch_queue.pop(0)
+        if len(task) == 3:
+            fp, mode, fmt = task
+        else:
+            fp, mode = task
+            fmt = "avi"  # Fallback default
         idx = self.total_tasks - len(self.batch_queue)
         logger.debug(f"_run_next_batch: dispatching task {idx}/{self.total_tasks}: {mode} '{fp}'")
         self.progress.setValue(0)
@@ -793,17 +818,17 @@ class MainWindow(QMainWindow):
         try:
             nframes = self.frames[str(fp)]
         except:
-            logger.warning("Could not find frame count for "+str(fp))
+            logger.warning("Could not find frame count for " + str(fp))
 
         # Create new worker
-        if mode in ("compress", "uncompress"):
+        if mode in ("compress", "decompress"):
             if nframes > 1:
                 if mode == "compress":
                     out_fp = fp.with_suffix(".mkv")
                 else:
-                    out_fp = fp.with_name(fp.stem + "_RAW.avi")
+                    out_fp = fp.with_name(fp.stem + "_RAW." + fmt.lower())
                 #out_fp = (fp.with_suffix(".mkv") if mode == "compress" else fp.with_suffix(".avi"))
-                worker = FFmpegConverter(fp, out_fp, nframes, mode, self.tracker.track_storage)
+                worker = FFmpegConverter(fp, out_fp, nframes, mode, self.tracker.track_storage, self.formats[str(fp)])
                 logger.debug(f"_run_next_batch: created FFmpegConverter for {fp} → out {out_fp}")
                 worker.result.connect(self.on_conversion_complete_and_continue)
                 #worker.finished.connect(self._run_next_batch)
