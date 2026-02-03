@@ -50,6 +50,11 @@ class FFmpegConverter(QThread):
             self.progress.emit(100)  # Finish
             if self.track:
                 self._emit_size_diff()
+
+        except ValueError as ve:
+            # This catches your "16-bit RGB not supported" error
+            logger.warning(f"Conversion skipped: {ve}")
+            self.failed.emit(self.input_path, str(ve))
         except Exception as e:
             logger.error(f"WORKER CRASHED processing {self.input_path}!", exc_info=True)  # Catch crashes and log traceback
             self.failed.emit(self.input_path, str(e))
@@ -200,18 +205,25 @@ class FFmpegConverter(QThread):
                 str(self.output_path)
             ]
         else:
-            if "yuv" in self.in_fmt:
-                target = "bgr24"
-            elif "16" in self.in_fmt:
-                target = "bgr48le" if any(x in self.in_fmt for x in ["rgb", "bgr", "0"]) else "gray16le"
-            else:
-                target = "bgr24" if any(x in self.in_fmt for x in ["rgb", "bgr", "0"]) else "gray"
+
+            is_16bit = "16" in self.in_fmt or "48" in self.in_fmt
+
+            if is_16bit:
+                # Final Conclusion: AVI cannot handle raw 16-bit without
+                # falling back to broken RGB555.
+                raise ValueError(
+                    f"High bit-depth ({self.in_fmt}) is incompatible with raw AVI. "
+                    "Decompression aborted to prevent file corruption."
+                )
+
+            # Standard 8-bit Logic
+            is_color = any(x in self.in_fmt for x in ["rgb", "bgr", "0", "yuv"])
+            target = "bgr24" if is_color else "gray"
 
             return base + [
                 "-vcodec", "rawvideo",
-                "-vf", f"format={target}",  # Explicitly handles the YUV -> BGR conversion
+                "-vf", f"format={target}",
                 "-pix_fmt", target,
-                "-acodec", "copy",
                 str(self.output_path)
             ]
 
@@ -221,18 +233,19 @@ class FFmpegConverter(QThread):
         w = int(info.get("width", 0))
         h = int(info.get("height", 0))
         pix_fmt = info.get("pix_fmt", "gray")  # Default
-        channels = 3 if any(x in pix_fmt for x in ["rgb", "gbr", "bgr"]) else 1
+        is_16bit = "16" in pix_fmt or "48" in pix_fmt or "64" in pix_fmt
 
-        # Determine data types
-        if "16" in pix_fmt:
-            dtype = np.uint16
-            bpp = 2
-            # Ensure we use a format FFmpeg and Numpy agree on
-            target_pix_fmt = "rgb48le" if channels == 3 else "gray16le"
+        # Check if the source is grayscale or color
+        # YUV, PAL8, and RGB/BGR are all 'color' for our TIFF purposes
+        if any(x in pix_fmt for x in ["rgb", "gbr", "bgr", "yuv", "pal8", "0"]):
+            channels = 3
+            target_pix_fmt = "rgb48le" if is_16bit else "rgb24"
         else:
-            dtype = np.uint8
-            bpp = 1
-            target_pix_fmt = "rgb24" if channels == 3 else "gray"
+            channels = 1
+            target_pix_fmt = "gray16le" if is_16bit else "gray"
+
+        dtype = np.uint16 if is_16bit else np.uint8
+        bpp = 2 if is_16bit else 1
 
         frame_size = w * h * channels * bpp
 

@@ -127,7 +127,7 @@ class MainWindow(QMainWindow):
 
         self.format_dropdown = QComboBox()
         self.format_dropdown.addItems(["AVI", "TIF"])
-        self.format_dropdown.setCurrentText("AVI")
+        self.format_dropdown.setCurrentText("TIF")
 
         dropdown_container.addWidget(format_label)
         dropdown_container.addWidget(self.format_dropdown)
@@ -404,6 +404,8 @@ class MainWindow(QMainWindow):
                     color = "RGB"
                 elif "bgr" in pix.lower():
                     color = "BGR"
+                elif "gbr" in pix.lower():
+                    color = "GBR"
                 elif "yuv" in pix.lower():
                     color = "YUV"
                 self.table.setItem(r, 9, QTableWidgetItem(color))
@@ -759,6 +761,15 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(False)
         self.status.setText('Canceling after current task...')
 
+    def on_task_failed_and_continue(self, path, error_msg):
+        logger.error(f"Task failed for {path}: {error_msg}")
+        # Optionally update the table/status to show this specific file failed
+        # self.status.setText(f"Failed: {Path(path).name}")
+
+        # Crucial: clean up and move on
+        self.worker = None
+        QTimer.singleShot(500, self._run_next_batch)
+
     def _run_next_batch(self):
         #stack = "".join(traceback.format_stack())  # Only for serious worker stack debugging
         #current = threading.current_thread().name
@@ -831,6 +842,7 @@ class MainWindow(QMainWindow):
                 worker = FFmpegConverter(fp, out_fp, nframes, mode, self.tracker.track_storage, self.formats[str(fp)])
                 logger.debug(f"_run_next_batch: created FFmpegConverter for {fp} → out {out_fp}")
                 worker.result.connect(self.on_conversion_complete_and_continue)
+                worker.failed.connect(self.on_task_failed_and_continue)
                 #worker.finished.connect(self._run_next_batch)
         else:  # mode == "validate"
             orig = find_original_file(fp)
