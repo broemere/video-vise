@@ -1,17 +1,34 @@
-# VideoVise
+<p align="center">
+  <img src="https://github.com/broemere/video-vise/blob/main/icons/icon_128.png?raw=true" alt="VideoVise Logo">
+</p>
+<h3 align="center">VideoVise</h3>
+<p align="center">
+  Video compression app with lossless high ratio output.
+  <br>
+  <br>
+  <a href="https://ffmpeg.org/about.html">FFmpeg Project</a>
+  -
+  <a href="https://www.loc.gov/preservation/digital/formats/fdd/fdd000341.shtml">FFV1 codec</a>
+  -
+  <a href="http://www.tykocki-lab.com/">Tykocki Lab</a>
+</p>
 
-A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV videos using FFmpeg, with built-in validation and decompression back to AVI/TIF.
 
----
+## VideoVise
+
+A cross-platform application for compressing image sequences (AVI/TIFF) into lossless MKV videos using FFmpeg. Designed for zero image data loss, and fully reversible conversions.
+
 
 ## Features
 
-- **Batch conversion** of AVI or multi-page TIFF files into MKV  
-- **Validation** step to confirm no pixel data was lost or altered  
-- **Decompress** back to AVI or TIF for legacy workflows (e.g. ImageJ)  
+- Convert AVI or multi-page TIFF stacks into modern MKV format
+- **Batch conversion** of whole directories (including subdirectories)
+- **Validation** step to confirm zero pixel data was lost or altered
+- **Decompress** back to AVI or TIF for legacy workflows (e.g. ImageJ)
 - A clean GUI with comprehensive file metadata details/inspection
+- Auto-detection of corrupted or incomplete AVI files
+- Supported formats: gray, rgb, pal8, yuv, 16-bit (TIF only)
 
----
 
 ## Requirements
 
@@ -27,7 +44,6 @@ A simple GUI tool to batch-convert image sequences (AVI/TIFF) into lossless MKV 
   - Either on your system `PATH` (via your OS package manager)  
   - Or placed in a local `ffmpeg/` folder (see Installation)  
 
----
 
 ## Installation
 
@@ -82,7 +98,6 @@ or
     Run ```video_vise_<version>.exe``` in ```/dist```
     * This executable is fully self-contained, can be copied/moved, and no longer requires the source code or build environment.
 
----
 
 ## Usage
 1. Launch the GUI
@@ -92,7 +107,6 @@ or
 5. Safely delete your original image data
 6. Click Decompress to convert the mkv back to an avi/tif if necessary (for legacy hardware/software like ImageJ)
 
----
 
 ## License
 
