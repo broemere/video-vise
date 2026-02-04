@@ -16,13 +16,13 @@
 
 ## VideoVise
 
-A cross-platform application for compressing image sequences (AVI/TIFF) into lossless MKV videos using FFmpeg. Designed for zero image data loss, and fully reversible conversions.
+A cross-platform application for compressing raw image sequences (AVI/TIFF) into lossless MKV videos using FFmpeg. Designed for zero image data loss, and fully reversible conversions.
 
 
 ## Features
 
 - Convert AVI or multi-page TIFF stacks into modern MKV format
-- **Batch conversion** of whole directories (including subdirectories)
+- **Batch conversion** of directories (including subdirectories)
 - **Validation** step to confirm zero pixel data was lost or altered
 - **Decompress** back to AVI or TIF for legacy workflows (e.g. ImageJ)
 - A clean GUI with comprehensive file metadata details/inspection
@@ -30,58 +30,45 @@ A cross-platform application for compressing image sequences (AVI/TIFF) into los
 - Supported formats: gray, rgb, pal8, yuv, 16-bit (TIF only)
 
 
-## Requirements
+## Quick Start
 
-### Running app
+### Desktop Application
 
-* Windows
-* Mac
-
-### Building app
-
-- **Python 3.7+** with the packages in `requirements.txt`
-- **FFmpeg & FFprobe** binaries  
-  - Either on your system `PATH` (via your OS package manager)  
-  - Or placed in a local `ffmpeg/` folder (see Installation)  
+Download and run the latest exe/dmg from https://github.com/broemere/video-vise/releases
 
 
-## Installation
+>*Note: Windows may block the program on the first run.*
+>
+>`"Windows protected your PC"` → `More info` → `Run anyway`
 
-### Direct run
-
-* Download and run the exe/dmg from https://github.com/broemere/video-vise/releases
-* Your OS may block the program the first time it is run.
-  `"Windows protected your PC` → `More info` → `Run anyway`
+---
 
 ### Building from source code
 
-### 1. Clone the repository
+#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/broemere/video-vise.git
 ```
-or
 
-Direct download: https://github.com/broemere/video-vise/releases
-
-
-### 2. Install Python dependencies
+#### 2. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
-   
-### 3. **Set up FFmpeg**
+
+#### 3. **Set up FFmpeg**
 
 1. Download the appropriate **FFmpeg** build for your OS from 
-https://ffmpeg.org/download.html
+https://ffmpeg.org/download.html 
+(v7.1 used in development)
 2. Copy the FFmpeg and FFprobe executables to the ```ffmpeg/``` directory in the project root so you have:
     ```
     ffmpeg/ffmpeg(.exe on Windows)
     ffmpeg/ffprobe(.exe on Windows)
     ```
 
-### 4. Run the app
+#### 4. Run the app
 You can either:
 
 * Run directly from source
@@ -95,14 +82,26 @@ or
     ```bash
     python build.py
     ```
-    Run ```video_vise_<version>.exe``` in ```/dist```
+    Run ```video-vise_<version>.exe``` in ```/dist```
     * This executable is fully self-contained, can be copied/moved, and no longer requires the source code or build environment.
+
+
+## Requirements
+
+### Running app
+
+* Windows
+* Mac
+
+### Building app
+
+* **Python 3.7+** with packages in `requirements.txt`
 
 
 ## Usage
 1. Launch the GUI
 2. Select a folder containing your image data (avi or tiff files)
-3. Click Convert to compress the raw data into a lossless mkv video
+3. Click Compress to compress the raw data into a lossless mkv video
 4. Click Validate to double-check that the conversion was successful and there was no pixel data loss
 5. Safely delete your original image data
 6. Click Decompress to convert the mkv back to an avi/tif if necessary (for legacy hardware/software like ImageJ)
