@@ -50,6 +50,8 @@ class FFmpegConverter(QThread):
             self.progress.emit(100)  # Finish
             if self.track:
                 self._emit_size_diff()
+            else:
+                self.result.emit("", 0)  # Empty result in case of no tracking
 
         except ValueError as ve:
             # This catches your "16-bit RGB not supported" error

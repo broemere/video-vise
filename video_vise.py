@@ -595,7 +595,6 @@ class MainWindow(QMainWindow):
 
     def start_convert(self, fp: Path, mode: str):
         fmt = self.format_dropdown.currentText().lower()
-        print(fmt)
         # 1. Ensure we have frame count (same as before)
         fp_str = str(fp)
         if fp_str in self.frames:
@@ -621,6 +620,9 @@ class MainWindow(QMainWindow):
                 if "/" in current_text:
                     prefix_text = current_text[:len(current_text)-(current_text[::-1].find("/"))]
                     self.status.setText(f"{prefix_text}{self.total_tasks})")
+
+        self.cancel_requested = False
+        self.btn_cancel.setEnabled(True)
 
         # 3. Trigger the batch engine
         # If a worker is already running, _run_next_batch will safely exit
@@ -688,6 +690,9 @@ class MainWindow(QMainWindow):
                     # Finds the last slash and updates the number before the closing parenthesis
                     prefix_text = current_text[:len(current_text) - (current_text[::-1].find("/"))]
                     self.status.setText(f"{prefix_text}{self.total_tasks})")
+
+        self.cancel_requested = False
+        self.btn_cancel.setEnabled(True)
 
         # 3. Trigger Engine
         self._run_next_batch()
