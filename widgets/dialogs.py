@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import cv2
 import numpy as np
 import threading
 import traceback
@@ -15,16 +16,16 @@ from statistics import median
 import urllib.request
 
 # Third-Party Imports
-from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QBrush, QColor, QIcon, QPalette, QPixmap
+from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer, QPoint, QRect, QPointF, QRectF
+from PySide6.QtGui import QBrush, QColor, QIcon, QPalette, QPixmap, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QSizePolicy, QSplashScreen, QStyle, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget
+    QTableWidgetItem, QVBoxLayout, QWidget, QGraphicsView, QGraphicsScene, QGraphicsRectItem
 )
 from tifffile import TiffFile, imread
-from widgets.file_scanning import find_file_on_network_drives, find_original_file
+from widgets.file_scanning import find_file_on_network_drives, find_original_file, _look_for_csv
 from widgets.resources import setup_logging, icon_path, FFMPEG, FFPROBE
 from widgets.inspecting import get_video_info
 from config import *
@@ -32,7 +33,7 @@ import certifi
 import ssl
 
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 instructions = (
@@ -196,7 +197,7 @@ class UpdateChecker(QThread):
                     self.update_available.emit(latest_tag)
         except Exception as e:
             # Log silently; we don't want to annoy the user if they are offline
-            log.warning(f"Update check failed: {e}")
+            logger.warning(f"Update check failed: {e}")
 
     def _is_version_newer(self, remote_tag: str, current_version: str) -> bool:
         """
@@ -218,5 +219,315 @@ class UpdateChecker(QThread):
             return remote_parts > current_parts
         except ValueError:
             # Failsafe for tags that aren't standard numbers (e.g., "beta-release")
-            log.warning(f"Could not parse version tags for comparison: {remote_tag} vs {current_version}")
+            logger.warning(f"Could not parse version tags for comparison: {remote_tag} vs {current_version}")
             return False
+
+
+class CropLabel(QGraphicsView):
+    """
+        A QGraphicsView canvas for drawing a crop box on a zoomable image.
+        Automatically handles scroll bars, coordinate transformations, and zooming.
+        """
+    crop_completed = Signal(list)  # Emits: [x, y, width, height]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # --- Scene and View Setup ---
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CrossCursor)
+
+        self.setBackgroundBrush(QColor("#222222"))
+
+        # --- State Variables ---
+        self._image_item = None
+        self._crop_rect_item = None
+        self._start_point = None
+
+        # --- Drawing Styles ---
+        self._pen = QPen(QColor(0, 255, 255), 2)
+        self._pen.setCosmetic(True)  # Keeps the line 2px thick regardless of zoom
+
+    def set_background(self, pixmap: QPixmap):
+        """Clears the scene and sets a new background image."""
+        self.clear()
+        self._image_item = self._scene.addPixmap(pixmap)
+        self.reset_view()
+
+    def reset_view(self):
+        """Resets the view to fit the entire image within the viewport."""
+        if self._image_item:
+            self.fitInView(self._image_item, Qt.KeepAspectRatio)
+
+    def clear(self):
+        """Clears all items from the canvas."""
+        self._scene.clear()
+        self._image_item = None
+        self._crop_rect_item = None
+        self._start_point = None
+
+    def _clamp_to_image(self, pos: QPointF) -> QPointF:
+        """Forces the coordinates to stay strictly within the image boundaries."""
+        if not self._image_item:
+            return pos
+        rect = self._image_item.boundingRect()
+        x = max(rect.left(), min(pos.x(), rect.right()))
+        y = max(rect.top(), min(pos.y(), rect.bottom()))
+        return QPointF(x, y)
+
+    def _zoom(self, factor):
+        """Applies a zoom factor, centered on the mouse cursor."""
+        if self._image_item is None:
+            return
+        if factor < 1.0:
+            h_bar = self.horizontalScrollBar()
+            v_bar = self.verticalScrollBar()
+            if h_bar.maximum() <= 0 and v_bar.maximum() <= 0:
+                return
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.scale(factor, factor)
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+
+    # ——————————————
+    # Mouse & Key Events
+
+    def wheelEvent(self, event):
+        """Handles zooming and panning via the mouse wheel."""
+        if self._image_item is None:
+            return
+
+        angle = event.angleDelta().y()
+
+        if event.modifiers() == Qt.ControlModifier:
+            if angle > 0:
+                self._zoom(1.15)
+            else:
+                self._zoom(1 / 1.15)
+        elif event.modifiers() == Qt.ShiftModifier:
+            h_bar = self.horizontalScrollBar()
+            h_bar.setValue(h_bar.value() - angle)
+        else:
+            super().wheelEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Resets the view on double-click."""
+        if event.button() == Qt.LeftButton:
+            self.reset_view()
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        """Starts drawing the crop box."""
+        if event.button() != Qt.LeftButton or self._image_item is None:
+            super().mousePressEvent(event)
+            return
+
+        # 1. Map viewport click to native image coordinates
+        scene_pos = self.mapToScene(event.pos())
+        self._start_point = self._clamp_to_image(scene_pos)
+
+        # 2. Create or reset the crop rectangle
+        if self._crop_rect_item is None:
+            self._crop_rect_item = QGraphicsRectItem(QRectF(self._start_point, self._start_point))
+            self._crop_rect_item.setPen(self._pen)
+            self._scene.addItem(self._crop_rect_item)
+        else:
+            self._crop_rect_item.setRect(QRectF(self._start_point, self._start_point))
+
+    def mouseMoveEvent(self, event):
+        """Updates the crop box as the user drags."""
+        if self._start_point and self._crop_rect_item:
+            scene_pos = self.mapToScene(event.pos())
+            current_point = self._clamp_to_image(scene_pos)
+
+            # .normalized() safely handles drawing backwards/upwards
+            new_rect = QRectF(self._start_point, current_point).normalized()
+            self._crop_rect_item.setRect(new_rect)
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Finalizes the crop box and extracts the native coordinates."""
+        if event.button() == Qt.LeftButton and self._start_point and self._crop_rect_item:
+            scene_pos = self.mapToScene(event.pos())
+            end_point = self._clamp_to_image(scene_pos)
+
+            final_rect = QRectF(self._start_point, end_point).normalized()
+            self._crop_rect_item.setRect(final_rect)
+            self._start_point = None
+
+            # Extract exact 1:1 image coordinates
+            self.crop_completed.emit([
+                int(final_rect.x()),
+                int(final_rect.y()),
+                int(final_rect.width()),
+                int(final_rect.height())
+            ])
+
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        """Handles keyboard shortcuts."""
+        if event.key() in (Qt.Key_Equal, Qt.Key_Plus):
+            self._zoom(1.5)
+            event.accept()
+        elif event.key() in (Qt.Key_Minus, Qt.Key_Underscore):
+            self._zoom(1 / 1.5)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def get_crop_data(self):
+        """Allows external classes to fetch the coordinates manually."""
+        if self._crop_rect_item:
+            r = self._crop_rect_item.rect()
+            if r.width() > 0 and r.height() > 0:
+                return int(r.x()), int(r.y()), int(r.width()), int(r.height())
+        return None
+
+
+class CropDialog(QDialog):
+    def __init__(self, video_path: Path, total_frames: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Select Crop Region - {video_path.name}")
+        self.resize(1000, 1000)  # Give the dialog a nice default size
+
+        self.video_path = video_path
+        self.total_frames = total_frames
+        self.crop_coords = None
+
+        self.init_ui()
+        self.load_frame(total_frames)
+
+    def init_ui(self):
+        self.layout = QVBoxLayout(self)
+
+        # Instructions
+        self.info_label = QLabel(
+            "Click and drag to draw a crop box. "
+            "Use <b>Ctrl + Mouse Wheel</b> to zoom. Double-click to reset view."
+        )
+        self.layout.addWidget(self.info_label)
+
+        # The interactive QGraphicsView canvas
+        self.canvas = CropLabel()
+        self.layout.addWidget(self.canvas)
+
+        # Buttons
+        self.btn_layout = QHBoxLayout()
+        self.btn_confirm = QPushButton("Confirm")
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_confirm.setDefault(True)
+        self.btn_confirm.setAutoDefault(True)
+        self.btn_cancel.setDefault(False)
+        self.btn_cancel.setAutoDefault(False)
+
+        self.btn_layout.addStretch()
+        self.btn_layout.addWidget(self.btn_cancel)
+        self.btn_layout.addWidget(self.btn_confirm)
+        self.layout.addLayout(self.btn_layout)
+
+        # Connections
+        self.btn_confirm.clicked.connect(self.accept_crop)
+        self.btn_cancel.clicked.connect(self.reject)
+
+    def load_frame(self, total_frames: int):
+        target_frame_index = 0
+        csv_path = _look_for_csv(self.video_path)
+
+        if csv_path:
+            try:
+                # names=True reads the header row; dtype=float converts the data
+                data = np.genfromtxt(csv_path, delimiter=',', names=True, encoding='utf-8-sig', dtype=float)
+
+                # Validate parity/alignment
+                if len(data) == self.total_frames:
+                    # Check if 'distance' column exists
+                    if data.dtype.names and 'distance' in data.dtype.names:
+                        target_frame_index = int(np.argmax(data['distance']))
+                        logger.info(f"Target frame found at index {target_frame_index} (max distance).")
+                    # Check if 'pressure' column exists
+                    elif data.dtype.names and 'pressure' in data.dtype.names:
+                        target_frame_index = int(np.argmax(data['pressure']))
+                        logger.info(f"Target frame found at index {target_frame_index} (max pressure).")
+                    else:
+                        logger.warning(
+                            "CSV loaded, but 'distance' or 'pressure' column not found. Falling back to frame 0.")
+                else:
+                    logger.warning(
+                        f"Row count mismatch: CSV ({len(data)}) vs Video ({self.total_frames}). Falling back to frame 0.")
+            except Exception as e:
+                logger.error(f"Failed to process CSV for frame selection: {e}. Falling back to frame 0.")
+
+        # Open video and navigate to the target frame
+        cap = cv2.VideoCapture(str(self.video_path))
+
+        if target_frame_index > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_index)
+            self.info_label.setText(
+                "Located maximum deformation frame. Click and drag to draw a crop box. "
+                "<b>Ctrl + Wheel</b> to zoom."
+            )
+            ret, frame = cap.read()
+        else:
+            # Average 3 frames to get a good composite if no CSV is found
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames / 4))
+            ret1, frame1 = cap.read()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames / 2))
+            ret2, frame2 = cap.read()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames - 1))
+            ret3, frame3 = cap.read()
+
+            if ret1 and ret2 and ret3:
+                frame = (
+                                frame1.astype(np.float32) +
+                                frame2.astype(np.float32) +
+                                frame3.astype(np.float32)
+                        ) / 3.0
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
+                ret = True
+            else:
+                ret = False
+
+        cap.release()
+
+        if ret:
+            # OpenCV loads in BGR, PySide needs RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame.shape
+            bytes_per_line = ch * w
+            qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+
+            # Pass the full-resolution pixmap directly to the canvas
+            self.canvas.set_background(pixmap)
+        else:
+            self.info_label.setText("Failed to load video frame.")
+            self.btn_confirm.setEnabled(False)
+
+    def accept_crop(self):
+        raw_coords = self.canvas.get_crop_data()
+        if raw_coords:
+            # Because of QGraphicsView, these coords are already perfectly mapped
+            # to the native 1:1 image resolution! No scaling math required.
+            self.crop_coords = raw_coords
+            self.accept()
+        else:
+            self.reject()
+
+    def showEvent(self, event):
+        """
+        Triggered right when the dialog appears on screen.
+        This ensures the layout geometry is fully calculated before we attempt to fit the image.
+        """
+        super().showEvent(event)
+        self.canvas.reset_view()
+
+    def resizeEvent(self, event):
+        """Keeps the image fitted to the window if the user resizes the dialog."""
+        super().resizeEvent(event)
+        self.canvas.reset_view()

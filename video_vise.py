@@ -12,17 +12,18 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QSplashScreen, QStyle, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QComboBox
+    QTableWidgetItem, QVBoxLayout, QWidget, QComboBox, QDialog
 )
 from widgets.file_scanning import find_file_on_network_drives, find_original_file, get_files, load_storage_jsonl
 from widgets.resources import setup_logging, icon_path
 from widgets.inspecting import get_video_info, sample_tail_zeros
 from config import *
-from widgets.dialogs import PixelDialog, PixelLoaderThread, instructions, UpdateChecker
+from widgets.dialogs import PixelDialog, PixelLoaderThread, instructions, UpdateChecker, CropDialog
 from widgets.converter import FFmpegConverter
 from widgets.validator import FrameValidator
 from widgets.tracker import StorageTracker
 from widgets.formatting import format_duration
+from widgets.clipping import FFmpegCropper
 
 logger = setup_logging()
 
@@ -103,7 +104,7 @@ class MainWindow(QMainWindow):
         self.table.setPalette(pal)
         cols = [
             " ", "Filename","Size (GB)","Modified","Duration","Codec","PixelFmt",
-            "Resolution","Tag","Color/Gray","FPS","Frames","Compress","Validate","Lossless", "Relative Size", "Decompress", "Inspect"
+            "Resolution","Tag","Color/Gray","FPS","Frames","Compress","Validate","Lossless", "Relative Size", "Decompress", "Inspect", "Crop"
         ]
         self.table.setColumnCount(len(cols)); self.table.setHorizontalHeaderLabels(cols)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -529,6 +530,35 @@ class MainWindow(QMainWindow):
                     "QPushButton { padding-top: 2px; padding-bottom: 2px; padding-left: 4px; padding-right: 4px; }")
                 self.table.setCellWidget(r, 17, btni)
 
+
+                # — Column 18: Trim Button
+                # if codec == "ffv1":
+                #     # 1. Check for original source file
+                #     source_fp = source_map.get(fp_key)
+                #
+                #     # — Column 13: Validate (Only if source exists)
+                #     if source_fp is not None:
+                #         btnv = QPushButton("Validate")
+                #         btnv.clicked.connect(lambda _, p=fp: self.start_validate(p))
+                #         self.table.setCellWidget(r, 13, btnv)
+                #     else:
+                #         lbl = QLabel("Source not found")
+                #         lbl.setAlignment(Qt.AlignCenter)
+                #         lbl.setStyleSheet("color: #777; font-style: italic;")
+                #         self.table.setCellWidget(r, 13, lbl)
+                #
+                #     # — Column 16: Decompress (Always available for FFV1)
+                #     btnd = QPushButton("Decompress")
+                #     btnd.clicked.connect(lambda _, p=fp: self.start_convert(p, "decompress"))
+                #     self.table.setCellWidget(r, 16, btnd)
+
+                # — Column 19: Crop Button
+                if codec == "ffv1":
+                    btnc = QPushButton("Crop")
+                    btnc.clicked.connect(lambda _, p=fp: self.open_crop_dialog(p))
+                    btnc.setCheckable(True)
+                    self.table.setCellWidget(r, 18, btnc)
+
                 # Update progress based on files processed
                 # file_progress_count += 1
                 # if num_files_total > 0:
@@ -567,6 +597,61 @@ class MainWindow(QMainWindow):
         dlg = PixelDialog(fp, small_frame, parent=self)
         dlg.show()
 
+    def open_crop_dialog(self, fp: Path):
+        """Opens the crop dialog and captures the selected dimensions."""
+        fp_str = str(fp)
+        total_frames = self.frames.get(fp_str, 0)
+
+        previous_text = self.status.text()
+
+        self.status.setText("Loading frame data...")
+        QApplication.processEvents()
+
+        dialog = CropDialog(fp, total_frames, self)
+
+        if dialog.exec() == QDialog.Accepted:
+            coords = dialog.crop_coords
+            if coords:
+                x, y, w, h = coords
+                logger.info(f"Crop selected for {fp.name}: x={x}, y={y}, width={w}, height={h}")
+
+                # 1. Get original dimensions for bounding limits
+                info = get_video_info(fp)
+                orig_w = int(info.get("width", 0))
+                orig_h = int(info.get("height", 0))
+
+                # 2. Build output path with "_c" appended
+                out_fp = fp.with_name(f"{fp.stem}_c{fp.suffix}")
+
+                # 3. Package the task data and add to batch queue
+                crop_data = (x, y, w, h, orig_w, orig_h, out_fp)
+                task = (fp, "crop", crop_data)
+
+                if task not in self.batch_queue:
+                    self.batch_queue.append(task)
+
+                    if self.worker is None or not self.worker.isRunning():
+                        self.total_tasks = len(self.batch_queue)
+                    else:
+                        self.total_tasks += 1
+                    current_text = self.status.text()
+                    if "/" in current_text:
+                        prefix_text = current_text[:len(current_text) - (current_text[::-1].find("/"))]
+                        self.status.setText(f"{prefix_text}{self.total_tasks})")
+                    else:
+                        if "/" in previous_text:
+                            prefix_text = previous_text[:len(previous_text) - (previous_text[::-1].find("/"))]
+                            self.status.setText(f"{prefix_text}{self.total_tasks})")
+
+                self.cancel_requested = False
+                self.btn_cancel.setEnabled(True)
+
+                # 4. Trigger the engine
+                self._run_next_batch()
+        else:
+            logger.info(f"Crop action canceled for {fp.name}.")
+            self.status.setText("Ready")
+
     # def start_convert(self, fp: Path, mode: str):
     #     if str(fp) in self.frames:
     #         nframes = self.frames[str(fp)]
@@ -592,6 +677,24 @@ class MainWindow(QMainWindow):
     #     self.worker.result.connect(self.on_conversion_result)
     #     self.worker.finished.connect(lambda: self.update_table(self.path_edit.text()))
     #     self.worker.start()
+
+    def on_crop_complete_and_continue(self, orig_fp_str: str, out_fp: Path):
+        """Handles cleanup and UI refresh after a successful crop."""
+        logger.info(f"Crop completed successfully: {out_fp.name}")
+
+        if self.worker:
+            self.worker.quit()
+            self.worker.wait()
+        self.worker = None
+
+        #self.status.setText("Refreshing table...")
+        gc.collect()
+
+        # Refresh the table so the new "_c" file appears immediately
+        #self.update_table(self.path_edit.text())
+
+        # Continue to the next item in the batch queue
+        self._run_next_batch()
 
     def start_convert(self, fp: Path, mode: str):
         fmt = self.format_dropdown.currentText().lower()
@@ -820,7 +923,10 @@ class MainWindow(QMainWindow):
             self.update_table(self.path_edit.text())
 
         task = self.batch_queue.pop(0)
-        if len(task) == 3:
+        if len(task) == 3 and task[1] == "crop":
+            fp, mode, crop_data = task
+            fmt = "mkv"  # Placeholder, not used for crop
+        elif len(task) == 3:
             fp, mode, fmt = task
         else:
             fp, mode = task
@@ -828,7 +934,12 @@ class MainWindow(QMainWindow):
         idx = self.total_tasks - len(self.batch_queue)
         logger.debug(f"_run_next_batch: dispatching task {idx}/{self.total_tasks}: {mode} '{fp}'")
         self.progress.setValue(0)
-        self.status.setText(f"{mode.title() if mode.endswith('compress') else mode.title()[:-1]}ing {fp} ({idx}/{self.total_tasks})")
+        mode_verb = {
+            "compress": "Compressing",
+            "crop": "Cropping",
+            "validate": "Validating",
+        }[mode]
+        self.status.setText(f"{mode_verb} {fp} ({idx}/{self.total_tasks})")
         worker = None
         nframes = 0
         try:
@@ -849,6 +960,16 @@ class MainWindow(QMainWindow):
                 worker.result.connect(self.on_conversion_complete_and_continue)
                 worker.failed.connect(self.on_task_failed_and_continue)
                 #worker.finished.connect(self._run_next_batch)
+
+        elif mode == "crop":
+            if nframes > 1:
+                # Unpack the specialized crop data payload
+                x, y, w, h, orig_w, orig_h, out_fp = crop_data
+                worker = FFmpegCropper(fp, out_fp, nframes, x, y, w, h, orig_w, orig_h)
+                logger.debug(f"_run_next_batch: created FFmpegCropper for {fp} → out {out_fp}")
+                worker.result.connect(self.on_crop_complete_and_continue)
+                worker.failed.connect(self.on_task_failed_and_continue)
+
         else:  # mode == "validate"
             orig = find_original_file(fp)
             if orig is None:
@@ -933,10 +1054,6 @@ class MainWindow(QMainWindow):
                     w.setStyleSheet(f"color: {disabled_fg.name()};")
                 if tooltip:
                     w.setToolTip(tooltip)
-
-
-
-
 
 if __name__ == '__main__':
     os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts=false"  # Suppress weird font warning on built exe (Windows only)

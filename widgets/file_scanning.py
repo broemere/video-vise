@@ -252,3 +252,16 @@ def get_windows_network_locations():
             })
 
     return locations
+
+def _look_for_csv(path):
+    p = Path(path)
+    stems = [p.stem, p.stem.replace("_video", "_force"), p.stem.replace("_video", "_pressure")]
+    ext = ".csv"
+
+    for stem in stems:
+        candidate = p.with_stem(stem).with_suffix(ext)
+        if candidate.exists():
+            logger.info(f"Found matching csv: {candidate}")
+            return candidate
+
+    return None

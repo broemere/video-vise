@@ -4,3 +4,4 @@ tifffile>=2025.6.1
 pyinstaller>=6.17.0
 numpy>=2.3.4
 certifi>=2026.1.4
+opencv-python>=4.13.0.90
