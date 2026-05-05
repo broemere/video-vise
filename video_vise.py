@@ -650,7 +650,18 @@ class MainWindow(QMainWindow):
                 self._run_next_batch()
         else:
             logger.info(f"Crop action canceled for {fp.name}.")
-            self.status.setText("Ready")
+            if self.worker is None or not self.worker.isRunning():
+                self.status.setText("Ready")
+            else:
+                current_text = self.status.text()
+                if "/" in current_text:
+                    prefix_text = current_text[:len(current_text) - (current_text[::-1].find("/"))]
+                    self.status.setText(f"{prefix_text}{self.total_tasks})")
+                else:
+                    if "/" in previous_text:
+                        prefix_text = previous_text[:len(previous_text) - (previous_text[::-1].find("/"))]
+                        self.status.setText(f"{prefix_text}{self.total_tasks})")
+
 
     # def start_convert(self, fp: Path, mode: str):
     #     if str(fp) in self.frames:
