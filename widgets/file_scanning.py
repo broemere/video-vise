@@ -7,9 +7,109 @@ import json
 import subprocess
 import os
 from typing import Iterable
+from PySide6.QtCore import QThread, Signal
+from widgets.inspecting import get_video_info, sample_tail_zeros
 
 logger = logging.getLogger(__name__)
 
+
+class FileScannerThread(QThread):
+    # Signals to communicate with the main GUI thread
+    progress = Signal(int)
+    status_text = Signal(str)
+    # Emit a tuple containing all the dictionaries and lists we built
+    scan_finished = Signal(tuple)
+
+    def __init__(self, folder, known_lossless, parent=None):
+        super().__init__(parent)
+        self.folder = folder
+        self.known_lossless = known_lossless  # Pass existing cache if needed
+        self.is_cancelled = False
+
+    def run(self):
+        self.status_text.emit("Discovering files...")
+        base_folder = Path(self.folder)
+
+        # 1. Get files recursively
+        files = get_files(self.folder)
+
+        files_by_dir = {}
+        for fp in files:
+            if self.is_cancelled: return
+            parent_dir = fp.parent
+            if parent_dir not in files_by_dir:
+                files_by_dir[parent_dir] = []
+            files_by_dir[parent_dir].append(fp)
+
+        # 2. Build rendering order
+        all_items_to_render = []
+        if base_folder in files_by_dir:
+            top_level_files = sorted(files_by_dir[base_folder], key=lambda p: p.name.lower())
+            all_items_to_render.extend(top_level_files)
+            del files_by_dir[base_folder]
+
+        sorted_dirs = sorted(files_by_dir.keys(), key=str)
+        for dir_path in sorted_dirs:
+            if self.is_cancelled: return
+            relative_dir = dir_path.relative_to(base_folder)
+            all_items_to_render.append(str(relative_dir))
+            files_in_dir = sorted(files_by_dir[dir_path], key=lambda p: p.name.lower())
+            all_items_to_render.extend(files_in_dir)
+
+        # 3. Gather data
+        files_only = [x for x in all_items_to_render if isinstance(x, Path)]
+        total_files = len(files_only)
+
+        info_map = {}
+        tail_data = {}
+        source_map = {}
+        stat_map = {}
+        sizes = {}
+        formats = {}
+        codecs = {}
+        frames = {}
+
+        for i, fp in enumerate(files_only, 1):
+            if self.is_cancelled: return
+
+            self.status_text.emit(f"Scanning file {i}/{total_files}...")
+
+            fp_key = str(fp)
+            info = get_video_info(fp)  # This blocks, but now we are in the background!
+            info_map[fp_key] = info
+
+            codec = info.get("codec_name", "-")
+            if codec == "Unknown": codec = "-"
+            codecs[fp_key] = codec
+
+            if codec == "rawvideo":
+                tail_data[fp_key] = sample_tail_zeros(fp)
+
+            if codec in ("ffv1", "tiff"):
+                known = files_by_dir.get(fp.parent, files_only)
+                source_map[fp_key] = find_original_file(fp, silence=True, known_files=known)
+            else:
+                source_map[fp_key] = None
+
+            frames[fp_key] = int(info.get("frames", 0) or 0)
+            st = fp.stat()
+            stat_map[fp_key] = st
+            sizes[fp_key] = st.st_size
+            formats[fp_key] = info.get("pix_fmt", "")
+
+            # Emit progress calculation safely
+            self.progress.emit(int(100 * i / total_files) if total_files else 100)
+
+        if not self.is_cancelled:
+            # Package everything up and send it to the main thread
+            result_data = (
+                all_items_to_render, info_map, tail_data, source_map,
+                stat_map, sizes, formats, codecs, frames
+            )
+            self.scan_finished.emit(result_data)
+
+    def cancel(self):
+        self.is_cancelled = True
 
 def list_network_drives():
     """
