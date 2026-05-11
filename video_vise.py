@@ -512,6 +512,12 @@ class MainWindow(QMainWindow):
         if self.tracker.track_storage:
             self.gb_saved.setText(f"{int(self.tracker.get_gb_saved())} GB saved")
 
+        if getattr(self, 'waiting_for_table_update', False):
+            self.waiting_for_table_update = False
+            if self.batch_queue and not self.cancel_requested:
+                logger.debug("Table update finished. Resuming batch queue...")
+                self._run_next_batch()
+
     # def update_table(self, folder: str):
     #     """Updates the table with files, grouping them by subdirectory."""
     #     if not folder or not os.path.isdir(folder):
@@ -1006,9 +1012,10 @@ class MainWindow(QMainWindow):
     #     self.worker.finished.connect(lambda: self.update_table(self.path_edit.text()))
     #     self.worker.start()
 
-    def on_crop_complete_and_continue(self, orig_fp_str: str, out_fp: Path):
+    def on_crop_complete_and_continue(self, orig_fp_str: str, out_fp: Path, key_name: str, diff: int):
         """Handles cleanup and UI refresh after a successful crop."""
         logger.info(f"Crop completed successfully: {out_fp.name}")
+        self.on_conversion_result(key_name, diff)
 
         if self.worker:
             self.worker.quit()
@@ -1242,13 +1249,27 @@ class MainWindow(QMainWindow):
         #                  len(self.batch_queue))
         #     return
 
+        if hasattr(self, 'scanner_thread') and self.scanner_thread.isRunning():
+            logger.debug("Table scan in progress. Pausing batch execution until scan finishes.")
+            self.waiting_for_table_update = True
+            return
+
         next_task = self.batch_queue[0]
         next_mode = next_task[1]
         idx = self.total_tasks - len(self.batch_queue) + 1
         # Update the table if we had >0 compresss, and we're about to run the first validate:
-        if self.num_compress > 0 and next_mode == 'validate' and idx == self.num_compress + 1:
+        # if self.num_compress > 0 and next_mode == 'validate' and idx == self.num_compress + 1:
+        #     logger.debug("All compress tasks finished → calling update_table() before starting validation")
+        #     self.update_table(self.path_edit.text())
+
+        # Update the table if we had >0 compresss, and we're about to run the first validate:
+        if getattr(self, 'num_compress', 0) > 0 and next_mode == 'validate' and idx == getattr(self, 'num_compress',
+                                                                                               0) + 1:
             logger.debug("All compress tasks finished → calling update_table() before starting validation")
+            self.num_compress = 0  # CRITICAL: Reset so we don't trigger this again!
+            self.waiting_for_table_update = True
             self.update_table(self.path_edit.text())
+            return  # CRITICAL: Stop executing _run_next_batch here!
 
         task = self.batch_queue.pop(0)
         if len(task) == 3 and task[1] == "crop":
@@ -1293,7 +1314,7 @@ class MainWindow(QMainWindow):
             if nframes > 1:
                 # Unpack the specialized crop data payload
                 x, y, w, h, orig_w, orig_h, out_fp = crop_data
-                worker = FFmpegCropper(fp, out_fp, nframes, x, y, w, h, orig_w, orig_h)
+                worker = FFmpegCropper(fp, out_fp, nframes, x, y, w, h, orig_w, orig_h, self.tracker.track_storage)
                 logger.debug(f"_run_next_batch: created FFmpegCropper for {fp} → out {out_fp}")
                 worker.result.connect(self.on_crop_complete_and_continue)
                 worker.failed.connect(self.on_task_failed_and_continue)

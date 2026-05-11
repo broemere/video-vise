@@ -15,11 +15,12 @@ class FFmpegCropper(QThread):
     failed = Signal(Path, str)
 
     def __init__(self, input_path: Path, output_path: Path, frames: int, x: int, y: int, w: int, h: int, orig_w: int,
-                 orig_h: int):
+                 orig_h: int, track: bool):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
         self.frames = frames
+        self.track = track
 
         # Original video dimensions bounds checking
         self.orig_w = orig_w
@@ -130,8 +131,27 @@ class FFmpegCropper(QThread):
             os.utime(self.output_path, (stat.st_atime, stat.st_mtime))
 
             self.progress.emit(100)
-            self.result.emit(str(self.input_path), self.output_path)
+
+            if track:
+                key_name, result = self._get_size_diff()
+                if result == 0:
+                    self.result.emit(str(self.input_path), self.output_path, "", 0)
+                else:
+                    self.result.emit(str(self.input_path), self.output_path, key_name, diff)
 
         except Exception as e:
             logger.error(f"WORKER CRASHED cropping {self.input_path}!", exc_info=True)
             self.failed.emit(self.input_path, str(e))
+
+    def _get_size_diff(self):
+        try:
+            input_size = self.input_path.stat().st_size
+            output_size = self.output_path.stat().st_size
+            diff = int(round((input_size - output_size) / (1024 ** 3)))
+            if diff == input_size:
+                diff = 0
+        except Exception:
+            diff = 0
+
+        name = str(self.input_path.name)[:-4].replace(" ", "")
+        return [name + str(input_size), diff]
