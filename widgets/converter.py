@@ -63,7 +63,7 @@ class FFmpegConverter(QThread):
 
     def _process_tiff(self, threads: int, slices: int):
         info = get_video_info(self.input_path)
-        fps = float(info.get("raw_fps", DEFAULT_FPS))  # Use raw_fps if available for precision
+        fps = float(info.get("fps", DEFAULT_FPS))  # Use raw_fps if available for precision
         if fps == 0: fps = DEFAULT_FPS  # Fallback
 
         pix_fmt = info.get("pix_fmt", "gray")
