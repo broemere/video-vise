@@ -1012,9 +1012,9 @@ class MainWindow(QMainWindow):
     #     self.worker.finished.connect(lambda: self.update_table(self.path_edit.text()))
     #     self.worker.start()
 
-    def on_crop_complete_and_continue(self, orig_fp_str: str, out_fp: Path, key_name: str, diff: int):
+    def on_crop_complete_and_continue(self, orig_fp_str: str, out_fp: str, key_name: str, diff: int):
         """Handles cleanup and UI refresh after a successful crop."""
-        logger.info(f"Crop completed successfully: {out_fp.name}")
+        logger.info(f"Crop completed successfully: {out_fp}")
         self.on_conversion_result(key_name, diff)
 
         if self.worker:

@@ -511,13 +511,30 @@ class CropDialog(QDialog):
 
     def accept_crop(self):
         raw_coords = self.canvas.get_crop_data()
-        if raw_coords:
-            # Because of QGraphicsView, these coords are already perfectly mapped
-            # to the native 1:1 image resolution! No scaling math required.
-            self.crop_coords = raw_coords
-            self.accept()
-        else:
-            self.reject()
+
+        # Scenario 1: The user clicked "Confirm" without drawing a box,
+        # or accidentally clicked without dragging (0x0 area).
+        if not raw_coords:
+            QMessageBox.warning(
+                self,
+                "No Crop Selected",
+                "No valid crop area detected. Please click and drag to draw a box on the image."
+            )
+            return  # Halts the process, keeps dialog open
+
+        # Scenario 2: A box was drawn, but it's suspiciously small.
+        x, y, w, h = raw_coords
+        if w <= 10 or h <= 10:
+            QMessageBox.warning(
+                self,
+                "Crop Too Small",
+                "You submitted a very small window for cropping (10 pixels or less). Please draw a larger box."
+            )
+            return  # Halts the process, keeps dialog open
+
+        # Scenario 3: Valid crop box. Proceed with closing.
+        self.crop_coords = raw_coords
+        self.accept()
 
     def showEvent(self, event):
         """

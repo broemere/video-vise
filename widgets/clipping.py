@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class FFmpegCropper(QThread):
     progress = Signal(int)
-    result = Signal(str, Path)  # Emits original filename and new output path
+    result = Signal(str, str, str, int)  # Emits original filename and new output path
     failed = Signal(Path, str)
 
     def __init__(self, input_path: Path, output_path: Path, frames: int, x: int, y: int, w: int, h: int, orig_w: int,
@@ -132,12 +132,12 @@ class FFmpegCropper(QThread):
 
             self.progress.emit(100)
 
-            if track:
+            if self.track:
                 key_name, result = self._get_size_diff()
                 if result == 0:
-                    self.result.emit(str(self.input_path), self.output_path, "", 0)
+                    self.result.emit(str(self.input_path), str(self.output_path), "", 0)
                 else:
-                    self.result.emit(str(self.input_path), self.output_path, key_name, diff)
+                    self.result.emit(str(self.input_path), str(self.output_path), key_name, result)
 
         except Exception as e:
             logger.error(f"WORKER CRASHED cropping {self.input_path}!", exc_info=True)
