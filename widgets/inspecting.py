@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 import subprocess
 import logging
@@ -19,7 +20,6 @@ BASE_TIFF_FMT = {
 }
 
 logger = logging.getLogger(__name__)
-
 
 def get_video_info(fp: Path) -> dict[str, str]:
     """
@@ -70,85 +70,128 @@ def get_video_info(fp: Path) -> dict[str, str]:
         logger.error(f"get_video_info failed for {fp}: {e}", exc_info=True)
         return default
 
-
 def get_tiff_summary(tif: TiffFile):
     """
     Efficiently inspects a TIF file (for all 3 cases)
     and returns its vital stats *without* loading pixel data.
     """
-    if not tif.series:
-        raise ValueError("TIF file contains no series.")
+    page_count = len(tif.pages)
+    if page_count == 0:
+        raise ValueError("TIF file contains no pages.")
 
-    # --- CASE 3: Multi-Series (OMEX / One frame per series) ---
-    if len(tif.series) > 1:
-        if not tif.series[0] or not tif.series[0].pages:
-            raise ValueError("TIF file series[0] contains no pages.")
+    first_page = tif.pages[0]
 
-        # Optimization: Don't list-comp all pages. Use the series itself as the container.
-        # assume series[i].pages[0] is the frame.
-        first_page_obj = tif.series[0].pages[0]
+    # 2. Extract shape and dtype directly from the first page.
+    # This avoids asking .series for the information.
+    series_shape = first_page.shape
+    series_dtype = first_page.dtype
 
-        # Create a proxy wrapper to treat series like a page list
-        class SeriesProxy:
-            def __init__(self, series_seq):
-                self.series = series_seq
-
-            def __getitem__(self, index):
-                # Lazy access: only parses the specific series when requested
-                return self.series[index].pages[0]
-
-            def __len__(self):
-                return len(self.series)
-
-        access_strategy = SeriesProxy(tif.series)
-        total_frames = len(tif.series)
-        series_shape = tif.series[0].shape
-        series_dtype = tif.series[0].dtype
-
-        return first_page_obj, access_strategy, total_frames, series_shape, series_dtype
-
-    # --- CASES 1 & 2: Single-Series ---
-    main_series = tif.series[0]
-    series_shape = main_series.shape
-    series_dtype = main_series.dtype
-
-    # Identify dimensionality
     ndim = len(series_shape)
     has_color = (ndim > 0 and series_shape[-1] in (3, 4))
     spatial_dims = ndim - 1 if has_color else ndim
 
-    def calc_frames_from_shape():
-        if spatial_dims > 2:
-            return series_shape[0]  # (T, Y, X)
-        return 1
+    calculated_frames = series_shape[0] if spatial_dims > 2 else 1
 
-    calculated_frames = calc_frames_from_shape()
-    page_count = len(main_series.pages) if main_series.pages else 0
-
-    # Logic: If we have many frames in the Shape, but only 1 Page (or 0),
-    # it is a Case 2 Hyperstack. We MUST use the Series as the access object.
-
-    # Identify the first page for metadata (tags)
-    # Even a hyperstack usually has at least 1 page containing the tags.
-    first_page_obj = main_series.pages[0] if page_count > 0 else None
-
-    # Check for Hyperstack condition:
+    # 4. Check for Hyperstack condition (Case 2)
     # We have many frames in the shape, but few pages (usually 1) in the file structure.
     is_hyperstack = (page_count <= 1 and calculated_frames > 1)
 
     if is_hyperstack:
-        # Case 2: Hyperstack (memory mapping / internal decoding)
-        # CRITICAL FIX: Return 'first_page_obj' (a Page) for metadata,
-        # but '[main_series]' (a Series list) for pixel access.
-        return first_page_obj, [main_series], calculated_frames, series_shape, series_dtype
+        # Case 2: Hyperstack.
+        # THIS is the only time we are forced to pay the performance penalty of `.series`
+        if not tif.series:
+            raise ValueError("Hyperstack TIF contains no series.")
 
-    # Case 1: Standard Multi-Page
-    if page_count > 1:
-        total_frames = page_count
-    else:
-        total_frames = 1
+        main_series = tif.series[0]
+        return first_page, [main_series], calculated_frames, series_shape, series_dtype
 
-    return first_page_obj, main_series.pages, total_frames, series_shape, series_dtype
+    # --- Case 1 & Case 3 ---
+    # For standard stacks and multi-series stacks where every frame is a page,
+    # tif.pages is already a perfect, lazy-loading list of frames.
+    total_frames = page_count if page_count > 1 else 1
+
+    # We return tif.pages as the access_strategy.
+    # No SeriesProxy class is needed, and we never touch tif.series!
+    return first_page, tif.pages, total_frames, series_shape, series_dtype
+
+
+    # OLD TIF Inspecting Method
+
+    # --- CASE 3: Multi-Series (OMEX / One frame per series) ---
+
+    # series_len = len(tif.series)
+    #
+    # if series_len > 1:
+    #     logger.info("TIF Case 3")
+    #     if not tif.series[0] or not tif.series[0].pages:
+    #         raise ValueError("TIF file series[0] contains no pages.")
+    #
+    #     # Optimization: Don't list-comp all pages. Use the series itself as the container.
+    #     # assume series[i].pages[0] is the frame.
+    #     first_page_obj = tif.series[0].pages[0]
+    #     page_count = len(tif.pages)
+    #
+    #     if series_len == page_count:
+    #         access_strategy = tif.pages
+    #         logger.info("Direct access")
+    #     else:
+    #         # Absolute fallback if multiple series have multiple pages
+    #         class SeriesProxy:
+    #             def __init__(self, series_seq): self.series = series_seq
+    #             def __getitem__(self, i): return self.series[i].pages[0]
+    #             def __len__(self): return len(self.series)
+    #         access_strategy = SeriesProxy(tif.series)
+    #
+    #     #access_strategy = SeriesProxy(tif.series)
+    #     total_frames = series_len
+    #     series_shape = tif.series[0].shape
+    #     series_dtype = tif.series[0].dtype
+    #
+    #     return first_page_obj, access_strategy, total_frames, series_shape, series_dtype
+    #
+    # # --- CASES 1 & 2: Single-Series ---
+    # main_series = tif.series[0]
+    # series_shape = main_series.shape
+    # series_dtype = main_series.dtype
+    #
+    # # Identify dimensionality
+    # ndim = len(series_shape)
+    # has_color = (ndim > 0 and series_shape[-1] in (3, 4))
+    # spatial_dims = ndim - 1 if has_color else ndim
+    #
+    # def calc_frames_from_shape():
+    #     if spatial_dims > 2:
+    #         return series_shape[0]  # (T, Y, X)
+    #     return 1
+    #
+    # calculated_frames = calc_frames_from_shape()
+    # page_count = len(main_series.pages) if main_series.pages else 0
+    #
+    # # Logic: If we have many frames in the Shape, but only 1 Page (or 0),
+    # # it is a Case 2 Hyperstack. We MUST use the Series as the access object.
+    #
+    # # Identify the first page for metadata (tags)
+    # # Even a hyperstack usually has at least 1 page containing the tags.
+    # first_page_obj = main_series.pages[0] if page_count > 0 else None
+    #
+    # # Check for Hyperstack condition:
+    # # We have many frames in the shape, but few pages (usually 1) in the file structure.
+    # is_hyperstack = (page_count <= 1 and calculated_frames > 1)
+    #
+    # if is_hyperstack:
+    #     # Case 2: Hyperstack (memory mapping / internal decoding)
+    #     # CRITICAL FIX: Return 'first_page_obj' (a Page) for metadata,
+    #     # but '[main_series]' (a Series list) for pixel access.
+    #     return first_page_obj, [main_series], calculated_frames, series_shape, series_dtype
+    #
+    # # Case 1: Standard Multi-Page
+    # if page_count > 1:
+    #     total_frames = page_count
+    # else:
+    #     total_frames = 1
+    #
+    # return first_page_obj, main_series.pages, total_frames, series_shape, series_dtype
+
 
 def inspect_tiff(fp: Path) -> dict[str, any]:
     """
@@ -237,10 +280,12 @@ def inspect_tiff(fp: Path) -> dict[str, any]:
             # Strategy: Grab first 5 frames for FPS delta, and Last frame for Duration
             # This makes the complexity O(1) instead of O(N)
             indices_to_check = list(range(min(n_pages, 5)))
-            if n_pages > 5:
-                indices_to_check.append(n_pages - 1)
+            # if n_pages > 5:
+            #     indices_to_check.append(n_pages - 1)
 
             sorted_times = {}  # Map index -> time
+
+            time_pattern = re.compile(r'"(?:deviceTime|time_s)"\s*:\s*([0-9.]+)')
 
             for idx in indices_to_check:
                 try:
@@ -251,27 +296,32 @@ def inspect_tiff(fp: Path) -> dict[str, any]:
                     if not desc: continue
 
                     val = desc.value
-                    if isinstance(val, bytes): val = val.decode('utf-8', errors='ignore')
+                    if isinstance(val, bytes):
+                        val = val.decode('utf-8', errors='ignore')
 
                     # Quick string search to avoid full JSON parse if possible?
                     # JSON parse is safer though.
-                    d_info = json.loads(val)
-                    t = d_info.get("deviceTime")
-                    if t is None:
-                        t = d_info.get("time_s")
-                    if isinstance(t, (int, float)):
-                        sorted_times[idx] = t
+                    # d_info = json.loads(val)
+                    # t = d_info.get("deviceTime")
+                    # if t is None:
+                    #     t = d_info.get("time_s")
+                    # if isinstance(t, (int, float)):
+                    #     sorted_times[idx] = t
+                    # Faster regex search
+                    match = time_pattern.search(val)
+                    if match:
+                        sorted_times[idx] = float(match.group(1))
                 except Exception:
                     continue
 
             # Calculate from sampled data
             if sorted_times:
                 # 1. Total Duration: Last Time - First Time
-                start_idx = min(sorted_times.keys())
-                end_idx = max(sorted_times.keys())
+                #start_idx = min(sorted_times.keys())
+                #end_idx = max(sorted_times.keys())
 
-                if start_idx != end_idx:
-                    duration_sec = sorted_times[end_idx] - sorted_times[start_idx]
+                #if start_idx != end_idx:
+                #    duration_sec = sorted_times[end_idx] - sorted_times[start_idx]
 
                 # 2. Estimate FPS from the initial consecutive burst
                 deltas = []
@@ -284,6 +334,9 @@ def inspect_tiff(fp: Path) -> dict[str, any]:
 
                 median_dt = median(deltas) if deltas else 0
                 fps = (1.0 / median_dt) if median_dt > 0 else 0
+
+            if fps > 0:
+                duration_sec = (n_pages - 1) / fps
 
             # Sanity Checks
         fps = max(fps, 0)  # Return int FPS? Or float? User code used int(round())
