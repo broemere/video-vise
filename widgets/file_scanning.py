@@ -24,7 +24,6 @@ class FileScannerThread(QThread):
         super().__init__(parent)
         self.folder = folder
         self.known_lossless = known_lossless  # Pass existing cache if needed
-        self.is_cancelled = False
 
     def run(self):
         self.status_text.emit("Discovering files...")
@@ -35,7 +34,7 @@ class FileScannerThread(QThread):
 
         files_by_dir = {}
         for fp in files:
-            if self.is_cancelled: return
+            if self.isInterruptionRequested(): return
             parent_dir = fp.parent
             if parent_dir not in files_by_dir:
                 files_by_dir[parent_dir] = []
@@ -50,7 +49,7 @@ class FileScannerThread(QThread):
 
         sorted_dirs = sorted(files_by_dir.keys(), key=str)
         for dir_path in sorted_dirs:
-            if self.is_cancelled: return
+            if self.isInterruptionRequested(): return
             relative_dir = dir_path.relative_to(base_folder)
             all_items_to_render.append(str(relative_dir))
             files_in_dir = sorted(files_by_dir[dir_path], key=lambda p: p.name.lower())
@@ -70,7 +69,7 @@ class FileScannerThread(QThread):
         frames = {}
 
         for i, fp in enumerate(files_only, 1):
-            if self.is_cancelled: return
+            if self.isInterruptionRequested(): return
 
             self.status_text.emit(f"Scanning file {i}/{total_files}...")
 
@@ -100,16 +99,13 @@ class FileScannerThread(QThread):
             # Emit progress calculation safely
             self.progress.emit(int(100 * i / total_files) if total_files else 100)
 
-        if not self.is_cancelled:
+        if not self.isInterruptionRequested():
             # Package everything up and send it to the main thread
             result_data = (
                 all_items_to_render, info_map, tail_data, source_map,
                 stat_map, sizes, formats, codecs, frames
             )
             self.scan_finished.emit(result_data)
-
-    def cancel(self):
-        self.is_cancelled = True
 
 def list_network_drives():
     """
@@ -365,3 +361,49 @@ def _look_for_csv(path):
             return candidate
 
     return None
+
+
+class CompressibleScannerThread(QThread):
+    # Emits a sorted list of folder paths (strings)
+    scan_finished = Signal(list)
+    status_update = Signal(str)
+
+    def __init__(self, start_dir, parent=None):
+        super().__init__(parent)
+        self.start_dir = start_dir
+
+    def run(self):
+        found_dirs = set()
+
+        # os.walk is highly efficient here
+        for root, dirs, files in os.walk(self.start_dir):
+            if self.isInterruptionRequested():
+                return  # Safely abort if user closes the app
+
+            self.status_update.emit(f"Scanning: {root}")
+
+            for file_name in files:
+                if self.isInterruptionRequested():
+                    return
+
+                lower_file = file_name.lower()
+
+                # Check for TIF
+                if lower_file.endswith('.tif') or lower_file.endswith('.tiff'):
+                    found_dirs.add(root)
+                    break  # Found one! Move to the next directory
+
+                # Check for >1GB AVI
+                elif lower_file.endswith('.avi'):
+                    file_path = Path(root) / file_name
+                    try:
+                        # St.size is in bytes. 1GB = 1024^3 bytes
+                        if file_path.stat().st_size > (1024 * 1024 * 1024):
+                            found_dirs.add(root)
+                            break  # Found one! Move to the next directory
+                    except OSError:
+                        # Silently skip files we don't have permission to read
+                        pass
+
+                        # Emit the unique, sorted list of directories
+        self.scan_finished.emit(sorted(list(found_dirs)))

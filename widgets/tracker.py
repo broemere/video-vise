@@ -34,7 +34,7 @@ class StorageTracker:
 
     def get_gb_saved(self):
         """Return the sum of all numeric values in `data`."""
-        self.total_gb_saved = sum(self.filesizes_reduced.values())
+        self.total_gb_saved = round(sum(self.filesizes_reduced.values())/1000, 3)
         return self.total_gb_saved
 
     def add_member_jsonl(self, key: str, value) -> None:

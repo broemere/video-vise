@@ -14,11 +14,11 @@ from PySide6.QtWidgets import (
     QPushButton, QSplashScreen, QStyle, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QComboBox, QDialog
 )
-from widgets.file_scanning import find_file_on_network_drives, find_original_file, get_files, load_storage_jsonl, FileScannerThread
+from widgets.file_scanning import find_file_on_network_drives, find_original_file, get_files, load_storage_jsonl, FileScannerThread, CompressibleScannerThread
 from widgets.resources import setup_logging, icon_path
 from widgets.inspecting import get_video_info, sample_tail_zeros
 from config import *
-from widgets.dialogs import PixelDialog, PixelLoaderThread, instructions, UpdateChecker, CropDialog
+from widgets.dialogs import PixelDialog, PixelLoaderThread, instructions, UpdateChecker, CropDialog, CompressibleResultsDialog
 from widgets.converter import FFmpegConverter
 from widgets.validator import FrameValidator
 from widgets.tracker import StorageTracker
@@ -34,6 +34,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.settings = QSettings(ORG, APP_NAME.replace(" ",""))
         self.worker = None
+        self.scanner_thread = None
+        self.compressible_scanner = None
         self.batch_queue = []
         self.total_tasks = 0
         self.lossless_results = {}
@@ -72,8 +74,33 @@ class MainWindow(QMainWindow):
         """
         Called when the window is closing.
         """
+        # 1. Save UI state
         self.settings.setValue("windowGeometry", self.saveGeometry())
         self.settings.setValue("lastFolder", self.path_edit.text())
+
+        # 2. Safely shut down the background worker
+        if self.worker is not None and self.worker.isRunning():
+            self.status.setText("Shutting down workers, please wait...")
+            QApplication.processEvents()  # Force UI update before blocking
+
+            self.worker.requestInterruption()  # Tell the thread we want to stop
+            self.worker.wait()  # Block GUI until thread exits cleanly
+            self.worker = None
+
+        # Safely shut down the Scanner Thread
+        if getattr(self, 'scanner_thread', None) is not None and self.scanner_thread.isRunning():
+            self.status.setText("Stopping file scan, please wait...")
+            self.scanner_thread.requestInterruption()  # Using the native Qt interruption we added!
+            self.scanner_thread.wait()  # Wait for it to safely close
+            self.scanner_thread.deleteLater()  # Clean up the old one before making a new one
+            self.scanner_thread = None
+
+        if getattr(self, 'compressible_scanner', None) is not None and self.compressible_scanner.isRunning():
+            self.compressible_scanner.requestInterruption()
+            self.compressible_scanner.wait()
+            self.compressible_scanner = None
+
+        # 3. Proceed with standard close
         super().closeEvent(event)
 
     def init_ui(self):
@@ -85,8 +112,10 @@ class MainWindow(QMainWindow):
         browse_btn = QPushButton(self.style().standardIcon(QStyle.SP_DialogOpenButton), "Open Folder"); browse_btn.clicked.connect(self.browse_folder)
         refresh_btn = QPushButton(); refresh_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
         refresh_btn.setToolTip("Refresh"); refresh_btn.clicked.connect(lambda: self.update_table(self.path_edit.text()))
+        scan_btn = QPushButton(self.style().standardIcon(QStyle.SP_FileDialogContentsView), "Scan for Compressible Files"); scan_btn.clicked.connect(self.scan_folder)
+        scan_btn.setToolTip("Searches a directory for uncompressed TIF or AVI files and displays the results to the user")
         help_btn = QPushButton("Help"); help_btn.setToolTip("Show usage instructions"); help_btn.clicked.connect(self.show_help)
-        path_layout.addWidget(self.path_edit); path_layout.addWidget(browse_btn); path_layout.addWidget(refresh_btn); path_layout.addWidget(help_btn)
+        path_layout.addWidget(browse_btn); path_layout.addWidget(self.path_edit); path_layout.addWidget(refresh_btn); path_layout.addWidget(scan_btn); path_layout.addWidget(help_btn)
         layout.addLayout(path_layout)
         self.table = QTableWidget()
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -147,7 +176,7 @@ class MainWindow(QMainWindow):
         self.status = QLabel("Ready")#; self.status.setAlignment(Qt.AlignLeft)
         self.gb_saved = QLabel()#; self.gb_saved.setAlignment(Qt.AlignRight)
         if self.tracker.track_storage:
-            self.gb_saved.setText(f"{self.tracker.get_gb_saved()} GB saved")
+            self.gb_saved.setText(f"{self.tracker.get_gb_saved()} TB saved")
         self.progress = QProgressBar(); self.progress.setRange(0, 100); self.progress.setTextVisible(False)
         self.progress.setStyleSheet("QProgressBar{border:1px solid gray; border-radius:5px;}"+
                                    "QProgressBar::chunk{background-color:#4CAF50}")
@@ -192,6 +221,71 @@ class MainWindow(QMainWindow):
             self.lossless_results.clear()
             self.update_table(native)
 
+    def scan_folder(self):
+        """Triggered by the 'Scan Folder for Compressible Files' button."""
+
+        # 1. Prevent concurrent scans
+        if getattr(self, 'compressible_scanner', None) is not None and self.compressible_scanner.isRunning():
+            QMessageBox.warning(self, "Scan in Progress", "A deep folder scan is already running.")
+            return
+
+        # 2. Get starting directory
+        last = self.settings.value("lastFolder", type=str)
+        initial_dir = last if last and Path(last).exists() else str(Path.home())
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Root Folder to Scan",
+            initial_dir,
+            QFileDialog.ShowDirsOnly | QFileDialog.ReadOnly
+        )
+
+        if folder:
+            native = QDir.toNativeSeparators(folder)
+
+            # 3. Setup and start the worker
+            self.compressible_scanner = CompressibleScannerThread(native)
+
+            # Connect signals
+            self.compressible_scanner.status_update.connect(self.status.setText)
+            self.compressible_scanner.scan_finished.connect(self.on_compressible_scan_finished)
+
+            self.status.setText(f"Starting deep scan in {native}...")
+            self.compressible_scanner.start()
+
+    def on_compressible_scan_finished(self, directories):
+        """Triggered when the background scan completes."""
+
+        # 1. Standard memory cleanup
+        if self.compressible_scanner:
+            self.compressible_scanner.deleteLater()
+        self.compressible_scanner = None
+        self.status.setText("Scan complete.")
+
+        # 2. Handle empty results
+        if not directories:
+            QMessageBox.information(
+                self,
+                "No Files Found",
+                "No compressible files (.tif or >1GB .avi) were found in the selected directory tree."
+            )
+            return
+
+        # 3. Show the results dialog
+        dialog = CompressibleResultsDialog(directories, self)
+
+        # If the user double-clicks a folder, automatically load it into the main app
+        dialog.folder_selected.connect(self.load_scanned_folder)
+
+        dialog.exec()
+
+    def load_scanned_folder(self, folder_path):
+        """Helper to seamlessly load a chosen folder from the dialog."""
+        self.path_edit.setText(folder_path)
+        self.settings.setValue("lastFolder", folder_path)
+        self.lossless_results.clear()
+        self.update_table(folder_path)
+
     def update_progress(self, val: int):
         self.progress.setValue(val)
 
@@ -199,10 +293,11 @@ class MainWindow(QMainWindow):
         if not folder or not os.path.isdir(folder):
             return
 
-        # Cancel any existing scan
-        if hasattr(self, 'scanner_thread') and self.scanner_thread.isRunning():
-            self.scanner_thread.cancel()
+        if getattr(self, 'scanner_thread', None) is not None and self.scanner_thread.isRunning():
+            self.scanner_thread.requestInterruption()  # Using the native Qt interruption we added!
             self.scanner_thread.wait()  # Wait for it to safely close
+            self.scanner_thread.deleteLater()  # Clean up the old one before making a new one
+            self.scanner_thread = None
 
         self.table.setRowCount(0)
         self.status.setText("Starting scan...")
@@ -427,6 +522,7 @@ class MainWindow(QMainWindow):
 
                 # — Column 15: Relative Size
                 pct_item = QTableWidgetItem()
+                uncrop_fp = fp.with_stem(fp.stem.removesuffix("_c"))
                 pct_str = ""
                 if codec == "ffv1":
                     if source_fp is not None:
@@ -445,6 +541,17 @@ class MainWindow(QMainWindow):
                                 frames_item.setToolTip(
                                     f"Frame mismatch vs source:\n"
                                     f"Source: {source_fp.name} = {src_frames}\n"
+                                    f"Output: {fp.name} = {frames}"
+                                )
+                    elif uncrop_fp != fp:
+                        source_key = str(uncrop_fp)
+                        src_frames = self.frames.get(source_key)
+                        if isinstance(src_frames, int) and src_frames > 0:
+                            if frames != src_frames:
+                                frames_item.setBackground(QBrush(warning_color))
+                                frames_item.setToolTip(
+                                    f"Frame mismatch vs source:\n"
+                                    f"Source: {uncrop_fp.name} = {src_frames}\n"
                                     f"Output: {fp.name} = {frames}"
                                 )
                     else:
@@ -489,7 +596,7 @@ class MainWindow(QMainWindow):
                 #     self.table.setCellWidget(r, 16, btnd)
 
                 # — Column 19: Crop Button
-                if codec == "ffv1":
+                if codec == "ffv1" and not fp.stem.endswith("_c"):
                     btnc = QPushButton("Crop")
                     btnc.clicked.connect(lambda _, p=fp: self.open_crop_dialog(p))
                     btnc.setCheckable(True)
@@ -510,13 +617,18 @@ class MainWindow(QMainWindow):
         self.status.setText("Ready")
         self.progress.setValue(0)
         if self.tracker.track_storage:
-            self.gb_saved.setText(f"{int(self.tracker.get_gb_saved())} GB saved")
+            self.gb_saved.setText(f"{self.tracker.get_gb_saved()} TB saved")
 
         if getattr(self, 'waiting_for_table_update', False):
             self.waiting_for_table_update = False
             if self.batch_queue and not self.cancel_requested:
                 logger.debug("Table update finished. Resuming batch queue...")
                 self._run_next_batch()
+
+        # Clean up the thread memory
+        if self.scanner_thread:
+            self.scanner_thread.deleteLater()
+        self.scanner_thread = None
 
     # def update_table(self, folder: str):
     #     """Updates the table with files, grouping them by subdirectory."""
@@ -953,7 +1065,7 @@ class MainWindow(QMainWindow):
                 if task not in self.batch_queue:
                     self.batch_queue.append(task)
 
-                    if self.worker is None or not self.worker.isRunning():
+                    if self.worker is None:
                         self.total_tasks = len(self.batch_queue)
                     else:
                         self.total_tasks += 1
@@ -973,7 +1085,7 @@ class MainWindow(QMainWindow):
                 self._run_next_batch()
         else:
             logger.info(f"Crop action canceled for {fp.name}.")
-            if self.worker is None or not self.worker.isRunning():
+            if self.worker is None:
                 self.status.setText("Ready")
             else:
                 current_text = self.status.text()
@@ -1002,7 +1114,7 @@ class MainWindow(QMainWindow):
     #     if mode == "compress":
     #         out_fp = fp.with_name(fp.stem + ".mkv")
     #     else:
-    #         out_fp = fp.with_name(fp.stem + "_RAW.avi")
+    #         out_fp = fp.with_name(fp.stem + "_VV.avi")
     #
     #     self.status.setText(f"{mode.title()}ing {fp}")
     #     self.progress.setValue(0)
@@ -1018,8 +1130,7 @@ class MainWindow(QMainWindow):
         self.on_conversion_result(key_name, diff)
 
         if self.worker:
-            self.worker.quit()
-            self.worker.wait()
+            self.worker.deleteLater()
         self.worker = None
 
         #self.status.setText("Refreshing table...")
@@ -1049,7 +1160,7 @@ class MainWindow(QMainWindow):
         if task not in self.batch_queue:
             self.batch_queue.append(task)
             # Update total tasks if you want the progress bar (e.g., 1/5) to be accurate
-            if self.worker is None or not self.worker.isRunning():
+            if self.worker is None:
                 self.total_tasks = len(self.batch_queue)
             else:
                 # If already running, increment total so the count (idx) makes sense
@@ -1072,14 +1183,13 @@ class MainWindow(QMainWindow):
             self.tracker.filesizes_reduced = load_storage_jsonl(self.tracker.storage_path)
             if key_name not in self.tracker.filesizes_reduced.keys():
                 self.tracker.filesizes_reduced[key_name] = result
-                self.gb_saved.setText(f"{self.tracker.get_gb_saved()} GB saved")
+                self.gb_saved.setText(f"{self.tracker.get_gb_saved()} TB saved")
                 self.tracker.add_member_jsonl(key_name, result)
 
     def on_conversion_complete_and_continue(self, key_name: str, result: int):
         self.on_conversion_result(key_name, result)
         if self.worker:
-            self.worker.quit()
-            self.worker.wait()
+            self.worker.deleteLater()  # Safely destroy the C++ object
         self.worker = None
         self.status.setText("Loading...")
         gc.collect()
@@ -1118,7 +1228,7 @@ class MainWindow(QMainWindow):
         if task not in self.batch_queue:
             self.batch_queue.append(task)
 
-            if self.worker is None or not self.worker.isRunning():
+            if self.worker is None:
                 self.total_tasks = len(self.batch_queue)
             else:
                 # Apply your logic for updating n total tasks in the status bar
@@ -1153,8 +1263,7 @@ class MainWindow(QMainWindow):
     def on_validation_complete_and_continue(self, filename: str, ok: bool):
         self.on_validation_result(filename, ok)
         if self.worker:
-            self.worker.quit()
-            self.worker.wait()
+            self.worker.deleteLater()
         self.worker = None
         self.status.setText("Loading...")
         gc.collect()
@@ -1218,7 +1327,7 @@ class MainWindow(QMainWindow):
         #current = threading.current_thread().name
         #logger.debug(f"_run_next_batch ENTERED (thread={current}). Full call stack:\n{stack}")
 
-        if self.worker is not None and self.worker.isRunning():
+        if self.worker is not None:
             # Update UI to show progress of the queue
             #idx = self.total_tasks - len(self.batch_queue)
             #self.status.setText(f"Running task {idx}/{self.total_tasks} ({len(self.batch_queue)} queued)")
@@ -1249,7 +1358,7 @@ class MainWindow(QMainWindow):
         #                  len(self.batch_queue))
         #     return
 
-        if hasattr(self, 'scanner_thread') and self.scanner_thread.isRunning():
+        if getattr(self, 'scanner_thread', None) is not None and self.scanner_thread.isRunning():
             logger.debug("Table scan in progress. Pausing batch execution until scan finishes.")
             self.waiting_for_table_update = True
             return
@@ -1285,6 +1394,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         mode_verb = {
             "compress": "Compressing",
+            "decompress": "Decompressing",
             "crop": "Cropping",
             "validate": "Validating",
         }[mode]
@@ -1302,7 +1412,7 @@ class MainWindow(QMainWindow):
                 if mode == "compress":
                     out_fp = fp.with_suffix(".mkv")
                 else:
-                    out_fp = fp.with_name(fp.stem + "_RAW." + fmt.lower())
+                    out_fp = fp.with_name(fp.stem + "_VV." + fmt.lower())
                 #out_fp = (fp.with_suffix(".mkv") if mode == "compress" else fp.with_suffix(".avi"))
                 worker = FFmpegConverter(fp, out_fp, nframes, mode, self.tracker.track_storage, self.formats[str(fp)])
                 logger.debug(f"_run_next_batch: created FFmpegConverter for {fp} → out {out_fp}")

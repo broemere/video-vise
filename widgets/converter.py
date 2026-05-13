@@ -182,6 +182,10 @@ class FFmpegConverter(QThread):
         logger.debug(f"Launched FFmpeg (PID={proc.pid})")
 
         for line in proc.stderr:
+            if self.isInterruptionRequested():
+                logger.info("Interruption requested. Terminating FFmpeg process...")
+                proc.terminate()  # Kill the child process
+                break
             if self.frames:
                 m = frame_re.search(line)
                 if m:

@@ -130,6 +130,11 @@ class FrameValidator(QThread):
             self.progress.emit(current_start_pct)
 
             for line in proc.stdout:
+                if self.isInterruptionRequested():
+                    logger.info("Interruption requested. Terminating FFmpeg process...")
+                    proc.terminate()  # Kill the child process
+                    break
+
                 if line.startswith("#"): continue
                 chunk_hashes.append(line.split(",")[-1].strip())
                 count += 1

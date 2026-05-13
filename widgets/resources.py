@@ -41,13 +41,26 @@ icon_path = resource_path("icons", "app.ico")
 FFMPEG   = get_exe('ffmpeg')
 FFPROBE  = get_exe('ffprobe')
 
+def get_log_file() -> Path:
+    LOGNAME = f"{APP_NAME.replace(' ', '_').lower()}_debug.log"
+
+    if sys.platform.startswith("win"):
+        base = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Logs" / APP_NAME
+    else:
+        base = Path.home() / ".local" / "state" / APP_NAME / "logs"
+
+    base.mkdir(parents=True, exist_ok=True)
+    return base / LOGNAME
+
 def setup_logging():
     MAX_LOG_SIZE = 5 * 1024 * 1024  # 5 MB
     BACKUP_COUNT = 1                 # Keeps one file (e.g., app_debug.log.1)
     LOGNAME = f"{APP_NAME.replace(' ', '_').lower()}_debug.log"
     LOGFILE = resource_path(LOGNAME)
     if getattr(sys, "frozen", False):
-        LOGFILE = Path(LOGFILE).parent.parent / LOGNAME
+        LOGFILE = get_log_file()
         print(LOGFILE)
         file_handler = RotatingFileHandler(
             str(LOGFILE),

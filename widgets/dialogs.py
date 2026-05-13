@@ -16,17 +16,17 @@ from statistics import median
 import urllib.request
 
 # Third-Party Imports
-from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer, QPoint, QRect, QPointF, QRectF
+from PySide6.QtCore import QSettings, Qt, QThread, Signal, QTimer, QPoint, QRect, QPointF, QRectF, QUrl
 from PySide6.QtGui import QBrush, QColor, QIcon, QPalette, QPixmap, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
     QPushButton, QSizePolicy, QSplashScreen, QStyle, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QGraphicsView, QGraphicsScene, QGraphicsRectItem
+    QTableWidgetItem, QVBoxLayout, QWidget, QGraphicsView, QGraphicsScene, QGraphicsRectItem, QListWidget
 )
 from tifffile import TiffFile, imread
 from widgets.file_scanning import find_file_on_network_drives, find_original_file, _look_for_csv
-from widgets.resources import setup_logging, icon_path, FFMPEG, FFPROBE
+from widgets.resources import setup_logging, icon_path, FFMPEG, FFPROBE, get_log_file
 from widgets.inspecting import get_video_info
 from config import *
 import certifi
@@ -34,6 +34,9 @@ import ssl
 
 
 logger = logging.getLogger(__name__)
+
+log_dir = get_log_file().parent  # or however you store LOGFILE
+log_dir_url = QUrl.fromLocalFile(str(log_dir)).toString()
 
 
 instructions = (
@@ -46,7 +49,9 @@ instructions = (
     "<b>File Functions:</b><br>"
     "<i>Compress:</i> Compress video file.<br>"
     "<i>Validate:</i> Compare AVI/TIF and MKV files to verify no data loss.<br>"
-    "<i>Decompress:</i> Convert compressed video back to AVI/TIF.<br><br>"
+    "<i>Decompress:</i> Convert compressed video back to AVI/TIF.<br>"
+    "<i>Inspect:</i> Shows the pixel values for the top left 10x10 pixels of the first frame."
+    "<i>Crop:</i> Loads frame for the user to draw a crop box. Creates a new cropped video.<br><br>"
 
     "• Can run directly on server folders/files, but will be slower.<br>"
     "• Compressed videos cannot be opened directly in ImageJ.<br>"
@@ -62,6 +67,14 @@ instructions = (
     "original AVI/TIF if necessary for compatibility on older software or hardware.<br><br>"
 
     f"v{version}<br><br>"
+    
+    "<b>Issues</b><br>"
+    "If you encounter any issues or bugs with the program, contact the developer.<br>"
+    "Be sure to include the app version and the log file.<br>"
+    f"<a href='{log_dir_url}'>Open log folder</a><br>"
+    "<i>Windows:</i> C:/Users/(username)/AppData/Local/VideoVise/videovise_debug.log<br>"
+    "<i>Mac:</i> ~/Library/Logs/VideoVise/videovise_debug.log<br><br>"
+
 
     "<b>Third party components:</b><br>"
     "• This app uses Qt (PySide6) under terms of LGPL 3.0.<br>"
@@ -548,3 +561,34 @@ class CropDialog(QDialog):
         """Keeps the image fitted to the window if the user resizes the dialog."""
         super().resizeEvent(event)
         self.canvas.reset_view()
+
+
+class CompressibleResultsDialog(QDialog):
+    # Optional: emit the chosen folder so the main window can load it immediately
+    folder_selected = Signal(str)
+
+    def __init__(self, directories, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Compressible Folders Found")
+        self.resize(650, 400)
+
+        layout = QVBoxLayout(self)
+
+        label = QLabel(f"Found {len(directories)} folders containing .tif files or .avi files larger than 1GB. "
+                       f"<br><i>Double-click a folder to load it into the main app.</i>")
+        layout.addWidget(label)
+
+        self.list_widget = QListWidget()
+        self.list_widget.addItems(directories)
+        layout.addWidget(self.list_widget)
+
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close)
+
+        # Connect double-click to our custom action
+        self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+
+    def on_item_double_clicked(self, item):
+        self.folder_selected.emit(item.text())
+        self.accept()  # Close the dialog automatically

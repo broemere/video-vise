@@ -116,6 +116,10 @@ class FFmpegCropper(QThread):
 
             # Parse stderr for progress updates
             for line in proc.stderr:
+                if self.isInterruptionRequested():
+                    logger.info("Interruption requested. Terminating FFmpeg process...")
+                    proc.terminate()  # Kill the child process
+                    break
                 if self.frames > 0:
                     m = frame_re.search(line)
                     if m:
