@@ -70,10 +70,12 @@ def get_video_info(fp: Path) -> dict[str, str]:
         logger.error(f"get_video_info failed for {fp}: {e}", exc_info=True)
         return default
 
+
 def get_tiff_summary(tif: TiffFile):
     """
-    Efficiently inspects a TIF file (for all 3 cases)
-    and returns its vital stats *without* loading pixel data.
+    Efficiently inspects a TIF file and returns its vital stats.
+    Bypasses the .series performance penalty for large standard stacks,
+    while correctly identifying ImageJ/OME single-IFD hyperstacks.
     """
     page_count = len(tif.pages)
     if page_count == 0:
@@ -81,37 +83,39 @@ def get_tiff_summary(tif: TiffFile):
 
     first_page = tif.pages[0]
 
-    # 2. Extract shape and dtype directly from the first page.
-    # This avoids asking .series for the information.
+    # 1. Identify if we NEED to rely on .series parsing.
+    # tif.series is only slow if it has to collate thousands of pages.
+    # If page_count is 1, calling .series is O(1) and extremely fast.
+    # If it's a known metadata format (ImageJ/OME), we must use .series
+    # because the true shape is stored in the XML or ImageDescription tags.
+    is_metadata_format = tif.is_imagej or tif.is_ome or tif.is_scanimage
+
+    if page_count <= 1 or is_metadata_format:
+        if not tif.series:
+            raise ValueError("TIF file contains no series.")
+
+        main_series = tif.series[0]
+        series_shape = main_series.shape  # This will correctly return (9219, 800, 800)
+        series_dtype = main_series.dtype
+
+        ndim = len(series_shape)
+        has_color = (ndim > 0 and series_shape[-1] in (3, 4))
+        spatial_dims = ndim - 1 if has_color else ndim
+
+        calculated_frames = series_shape[0] if spatial_dims > 2 else 1
+
+        # Case 2: Hyperstack / Metadata Stack
+        if calculated_frames > 1 or is_metadata_format:
+            return first_page, [main_series], calculated_frames, series_shape, series_dtype
+
+    # 2. Cases 1 & 3: Standard multi-page stack
+    # Here we avoid tif.series entirely, keeping it lightning-fast for files
+    # where every frame is physically separated into its own IFD.
     series_shape = first_page.shape
     series_dtype = first_page.dtype
 
-    ndim = len(series_shape)
-    has_color = (ndim > 0 and series_shape[-1] in (3, 4))
-    spatial_dims = ndim - 1 if has_color else ndim
-
-    calculated_frames = series_shape[0] if spatial_dims > 2 else 1
-
-    # 4. Check for Hyperstack condition (Case 2)
-    # We have many frames in the shape, but few pages (usually 1) in the file structure.
-    is_hyperstack = (page_count <= 1 and calculated_frames > 1)
-
-    if is_hyperstack:
-        # Case 2: Hyperstack.
-        # THIS is the only time we are forced to pay the performance penalty of `.series`
-        if not tif.series:
-            raise ValueError("Hyperstack TIF contains no series.")
-
-        main_series = tif.series[0]
-        return first_page, [main_series], calculated_frames, series_shape, series_dtype
-
-    # --- Case 1 & Case 3 ---
-    # For standard stacks and multi-series stacks where every frame is a page,
-    # tif.pages is already a perfect, lazy-loading list of frames.
     total_frames = page_count if page_count > 1 else 1
 
-    # We return tif.pages as the access_strategy.
-    # No SeriesProxy class is needed, and we never touch tif.series!
     return first_page, tif.pages, total_frames, series_shape, series_dtype
 
 
@@ -275,7 +279,9 @@ def inspect_tiff(fp: Path) -> dict[str, any]:
             if fps > 0:
                 duration_sec = (n_pages - 1) / fps
 
-        else:
+        # We check if pages_proxy[0] has 'tags' to distinguish a TiffPage from a TiffPageSeries
+
+        elif hasattr(pages_proxy[0], 'tags') and len(pages_proxy) > 1:
             # Fallback: Scan deviceTime, but SAMPLE instead of linear scan
             # Strategy: Grab first 5 frames for FPS delta, and Last frame for Duration
             # This makes the complexity O(1) instead of O(N)
