@@ -142,6 +142,9 @@ class FFmpegCropper(QThread):
                     self.result.emit(str(self.input_path), str(self.output_path), "", 0)
                 else:
                     self.result.emit(str(self.input_path), str(self.output_path), key_name, result)
+            else:
+                # Add this fallback so the main thread knows to continue
+                self.result.emit(str(self.input_path), str(self.output_path), "", 0)
 
         except Exception as e:
             logger.error(f"WORKER CRASHED cropping {self.input_path}!", exc_info=True)
