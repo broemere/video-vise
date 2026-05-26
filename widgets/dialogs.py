@@ -56,7 +56,7 @@ instructions = (
     "• Can run directly on server folders/files, but will be slower.<br>"
     "• Compressed videos cannot be opened directly in ImageJ.<br>"
     "• VLC can play the MKV files: <a href='https://www.videolan.org/vlc/'>VLC Video Player</a><br>"
-    "• This app will never delete data, it will only create new files.<br>"
+    "• This app creates new files unless you choose Delete Validated Originals after a validated batch run.<br>"
     "• Validation compares videos frame by frame for any pixel mismatches.<br><br>"
 
     "This program takes files in raw/decompressed format, and uses FFMPEG<br>"

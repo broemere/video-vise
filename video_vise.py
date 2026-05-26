@@ -6,7 +6,7 @@ from pathlib import Path
 import gc
 
 # Third-Party Imports
-from PySide6.QtCore import QSettings, Qt, QTimer, Slot, QDir
+from PySide6.QtCore import QFile, QSettings, Qt, QTimer, Slot, QDir
 from PySide6.QtGui import QBrush, QColor, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QHBoxLayout,
@@ -45,6 +45,8 @@ class MainWindow(QMainWindow):
         self.formats = {}
         self.sizes = {}
         self.video_info_cache: dict[str, dict] = {}
+        self.validation_delete_sources: dict[str, Path] = {}
+        self.validated_originals_to_delete: dict[str, Path] = {}
         self.cancel_requested = False
         self.num_compress = 0
         self.tracker = StorageTracker()
@@ -148,6 +150,13 @@ class MainWindow(QMainWindow):
         self.btn_batch_compress_validate.clicked.connect(self.process_all_compress_validate)
         self.btn_cancel = QPushButton(self.style().standardIcon(QStyle.SP_BrowserStop), "Cancel"); self.btn_cancel.clicked.connect(self.cancel_batch)
         self.btn_cancel.setEnabled(False)
+        self.btn_delete_validated_originals = QPushButton("Delete Validated Originals")
+        self.btn_delete_validated_originals.setToolTip(
+            "Move the original AVI/TIF files from the last Compress and Validate All run to Trash. "
+            "Only files that passed validation are included."
+        )
+        self.btn_delete_validated_originals.clicked.connect(self.delete_validated_originals)
+        self.btn_delete_validated_originals.setEnabled(False)
 
         dropdown_container = QVBoxLayout()
         dropdown_container.setSpacing(2)  # Small space between label and box
@@ -162,6 +171,7 @@ class MainWindow(QMainWindow):
         dropdown_container.addWidget(format_label)
         dropdown_container.addWidget(self.format_dropdown)
         batch_layout.addWidget(self.btn_cancel)
+        batch_layout.addWidget(self.btn_delete_validated_originals)
         batch_layout.addStretch()
         batch_layout.addLayout(dropdown_container)
         batch_layout.addSpacing(20)
@@ -1144,6 +1154,7 @@ class MainWindow(QMainWindow):
 
     def start_convert(self, fp: Path, mode: str):
         fmt = self.format_dropdown.currentText().lower()
+
         # 1. Ensure we have frame count (same as before)
         fp_str = str(fp)
         if fp_str in self.frames:
@@ -1261,6 +1272,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
 
     def on_validation_complete_and_continue(self, filename: str, ok: bool):
+        self._record_validated_original(filename, ok)
         self.on_validation_result(filename, ok)
         if self.worker:
             self.worker.deleteLater()
@@ -1296,6 +1308,12 @@ class MainWindow(QMainWindow):
         compress_tasks = [(fp, 'compress') for fp in files if self.frames.get(str(fp), 0) > 1 and self.codecs.get(str(fp), "") != "mjpeg"]
         self.num_compress = len(compress_tasks)
         validate_tasks = [(fp.with_name(fp.stem + '.mkv'), 'validate') for fp, _ in compress_tasks]
+        self.validation_delete_sources = {
+            str(fp.with_name(fp.stem + '.mkv')): fp
+            for fp, _ in compress_tasks
+        }
+        self.validated_originals_to_delete.clear()
+        self.btn_delete_validated_originals.setEnabled(False)
         self.start_batch(compress_tasks + validate_tasks)
 
     def start_batch(self, tasks):
@@ -1312,6 +1330,84 @@ class MainWindow(QMainWindow):
         self.cancel_requested = True
         self.btn_cancel.setEnabled(False)
         self.status.setText('Canceling after current task...')
+
+    def _record_validated_original(self, filename: str, ok: bool):
+        if not ok:
+            return
+        original_fp = self.validation_delete_sources.get(str(Path(filename)))
+        if original_fp is None:
+            return
+        self.validated_originals_to_delete[str(original_fp)] = original_fp
+
+    def delete_validated_originals(self):
+        candidates = [
+            fp for fp in self.validated_originals_to_delete.values()
+            if fp.exists()
+        ]
+        if not candidates:
+            self.validated_originals_to_delete.clear()
+            self.btn_delete_validated_originals.setEnabled(False)
+            QMessageBox.information(
+                self,
+                "No originals to delete",
+                "There are no validated original files available to move to Trash."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Move originals to Trash?",
+            f"Move {len(candidates)} validated original file(s) to the system Trash?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        moved = []
+        failed = []
+        for fp in candidates:
+            if self._move_original_to_trash(fp):
+                moved.append(fp)
+            else:
+                failed.append(fp)
+
+        for fp in moved:
+            self.validated_originals_to_delete.pop(str(fp), None)
+
+        self.btn_delete_validated_originals.setEnabled(bool(self.validated_originals_to_delete))
+        self.update_table(self.path_edit.text())
+
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Some files were not deleted",
+                f"Moved {len(moved)} file(s) to Trash, but {len(failed)} file(s) could not be moved."
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Originals moved to Trash",
+                f"Moved {len(moved)} validated original file(s) to Trash."
+            )
+
+    def _move_original_to_trash(self, fp: Path):
+        if not fp.exists():
+            logger.info(f"Original already missing, nothing to delete: {fp}")
+            return True
+
+        try:
+            moved = QFile.moveToTrash(str(fp))
+        except Exception as e:
+            moved = False
+            logger.warning(f"QFile.moveToTrash failed for {fp}: {e}")
+
+        if moved:
+            logger.info(f"Moved original to Trash: {fp}")
+            return True
+
+        logger.warning(f"Could not move original to Trash: {fp}")
+        return False
 
     def on_task_failed_and_continue(self, path, error_msg):
         logger.error(f"Task failed for {path}: {error_msg}")
@@ -1336,6 +1432,8 @@ class MainWindow(QMainWindow):
         if self.cancel_requested:
             logger.debug("_run_next_batch: cancel_requested=True → clearing queue and returning")
             self.batch_queue.clear()
+            self.validated_originals_to_delete.clear()
+            self.btn_delete_validated_originals.setEnabled(False)
             self.status.setText("Canceled")
             self.progress.setValue(0)
             self.update_table(self.path_edit.text())
@@ -1348,6 +1446,7 @@ class MainWindow(QMainWindow):
             self.status.setText("Ready")
             self.progress.setValue(0)
             self.btn_cancel.setEnabled(False)
+            self.btn_delete_validated_originals.setEnabled(bool(self.validated_originals_to_delete))
             self.update_table(self.path_edit.text())
             self.flash_window()
             return
