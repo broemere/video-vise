@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import re
 import shutil
@@ -37,13 +38,15 @@ def clean():
     print("Clean complete.\n")
 
 
-def build(version):
+def build(version, mac_arch=None):
     """Runs the PyInstaller command after setting the version environment variable."""
     print("--- Running PyInstaller ---")
 
     # Set the version in an environment variable for the spec file to read (only for this process, not system)
     env = os.environ.copy()
     env['APP_VERSION'] = version
+    if sys.platform == 'darwin' and mac_arch:
+        env['APP_TARGET_ARCH'] = mac_arch
 
     command = ['pyinstaller', SPEC_FILE, '--clean']
 
@@ -53,7 +56,7 @@ def build(version):
     print("PyInstaller build successful!\n")
 
 
-def archive(version):
+def archive(version, mac_arch=None):
     """Creates a distributable ZIP archive of the build."""
     print("--- Creating distributable archive ---")
     platform = 'mac' if sys.platform == 'darwin' else 'win'
@@ -70,7 +73,8 @@ def archive(version):
             print("Ensure your .spec file is set to create a windowed .app bundle.")
             return
 
-        final_dmg_path = os.path.join('dist', f"{app_versioned_name}_{platform}.dmg")
+        arch_suffix = f"_{mac_arch}" if mac_arch else ""
+        final_dmg_path = os.path.join('dist', f"{app_versioned_name}_{platform}{arch_suffix}.dmg")
         print(f"Creating {final_dmg_path}...")
 
         command = [
@@ -129,12 +133,21 @@ def archive(version):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Build VideoVise distributables.")
+    parser.add_argument(
+        "--mac-arch",
+        choices=["arm64", "x86_64", "universal2"],
+        default="arm64" if sys.platform == "darwin" else None,
+        help="macOS target architecture for PyInstaller. Defaults to arm64 on macOS.",
+    )
+    args = parser.parse_args()
+
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     try:
         #clean()
         app_version = get_version()
-        build(app_version)
-        archive(app_version)
+        build(app_version, args.mac_arch)
+        archive(app_version, args.mac_arch)
         print("✅ Build process complete!")
     except Exception as e:
         print(f"\n--- ❌ BUILD FAILED ---")

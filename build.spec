@@ -7,6 +7,7 @@ import os
 # Get the version set by build.py. Fallback to '0.0.0' if not set.
 app_version = os.environ.get('APP_VERSION', '0.0.0')
 app_name = f'video_vise_v{app_version}'
+target_arch = os.environ.get('APP_TARGET_ARCH') if sys.platform == 'darwin' else None
 
 # --- Platform-specific settings ---
 if sys.platform == 'darwin':
@@ -54,6 +55,7 @@ if sys.platform == 'darwin':
         upx=True,
         console=False,
         icon=icon_file,
+        target_arch=target_arch,
     )
     coll = COLLECT(
         exe,

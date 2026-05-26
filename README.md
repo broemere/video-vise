@@ -24,6 +24,7 @@ A cross-platform application for compressing raw image sequences (AVI/TIFF) into
 - Convert AVI or multi-page TIFF stacks into modern MKV format
 - **Batch conversion** of directories (including subdirectories)
 - **Validation** step to confirm zero pixel data was lost or altered
+- Option to move originals from the last successful Compress and Validate run to Trash
 - **Decompress** back to AVI or TIF for legacy workflows (e.g. ImageJ)
 - A clean GUI with comprehensive file metadata details/inspection
 - Auto-detection of corrupted or incomplete AVI files
@@ -82,7 +83,11 @@ or
     ```bash
     python build.py
     ```
-    Run ```video-vise_<version>.exe``` in ```/dist```
+    On Apple Silicon Macs, this creates an arm64 app and DMG by default:
+    ```bash
+    python build.py --mac-arch arm64
+    ```
+    Run ```video-vise_<version>.exe``` or open the generated ```.dmg``` in ```/dist```
     * This executable is fully self-contained, can be copied/moved, and no longer requires the source code or build environment.
 
 
@@ -103,7 +108,7 @@ or
 2. Select a folder containing your image data (avi or tiff files)
 3. Click Compress to compress the raw data into a lossless mkv video
 4. Click Validate to double-check that the conversion was successful and there was no pixel data loss
-5. Safely delete your original image data
+5. After a Compress and Validate All run finishes, click Delete Validated Originals to move successfully validated source files to Trash
 6. Click Decompress to convert the mkv back to an avi/tif if necessary (for legacy hardware/software like ImageJ)
 
 
